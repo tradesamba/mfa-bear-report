@@ -294,6 +294,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <div class="scroll"><table id="altTbl"></table></div>
 </div>
 
+<div class="banner hidden" id="wizardNote" style="background:#33270f;color:var(--warn);border:1px solid var(--warn)"></div>
+
 <div class="card" id="step1">
   <div class="step">STEP 1 · Copy this into the Grok app (attach the MFABear V1 guide first)</div>
   <textarea id="grokBox" readonly></textarea>
@@ -419,7 +421,22 @@ else {
 
 // fill prompts
 document.getElementById('grokBox').value = D.grok_prompt;
-if(STAND_DOWN){ ['step1','step2'].forEach(id=>document.getElementById(id).classList.add('hidden')); }
+// Wizard visibility: the Grok/Claude sentiment workflow runs on any names that CLEARED the
+// integrity gate (survivors) — not only on tradeable Top-4 days. So we show the wizard whenever
+// there are survivors, and only hide the input steps when there is genuinely nothing to assess.
+const HAS_SURVIVORS = (D.survivors||[]).length > 0;
+const noteEl = document.getElementById('wizardNote');
+if(!HAS_SURVIVORS){
+  // nothing cleared the gate — no tickers to run sentiment on
+  ['step1','step2','step3'].forEach(id=>document.getElementById(id).classList.add('hidden'));
+  if(noteEl){ noteEl.textContent='No survivors cleared the integrity gate today — no sentiment step to run.'; noteEl.classList.remove('hidden'); }
+} else if(STAND_DOWN && noteEl){
+  // survivors exist but none are tradeable spreads yet — still worth a sentiment/upside-risk pass
+  noteEl.innerHTML='⛔ 0 tradeable spreads, but '+D.survivors.length+' name(s) cleared the gate. '
+    +'Run the sentiment workflow below on these as a <b>watchlist / upside-risk check</b> '
+    +'(they are candidates that just missed a veto, not confirmed trades).';
+  noteEl.classList.remove('hidden');
+}
 </script>
 </body>
 </html>"""
