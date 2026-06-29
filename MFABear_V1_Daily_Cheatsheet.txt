@@ -1,0 +1,137 @@
+🐻 MFA BEAR — DAILY CHEAT SHEET
+BEAR CALL SPREAD EDITION · built on MFA V6 (Deterministic Data Layer)
+STEP 0: LAYER 0 + BCS ENGINE (CODE) · STEP 1: GROK UPSIDE-RISK · STEP 2: CLAUDE CONFIRM
+ATTACH V1_MFABear_Comprehensive_Guide.md TO THE LLM STEPS
+
+═══════════════════════════════════════════════════════════════════
+WHAT THIS DOES — READ FIRST
+═══════════════════════════════════════════════════════════════════
+Finds the TOP 4 tickers each day to open a BEAR CALL SPREAD (sell an OTM call, buy a higher call;
+collect a credit). You WIN if the stock stays BELOW the short strike at expiry (flat / down /
+mildly up). You LOSE if it rallies through. Defined-risk, NEGATIVE SKEW: max loss > max gain, so a
+HIGH WIN RATE is essential and OVER-rejecting is cheap, UNDER-rejecting is ruinous.
+
+This is the MIRROR of MFA V6 (which buys bullish breakouts). Same deterministic data layer + Veto #8
+integrity gate; the screen direction, scoring, vetoes, and the option-chain step are bear-oriented.
+
+OLD MFA V6 FLOW:  Layer 0 (long screen) → Grok sentiment → Claude scoring → Top 4 longs
+NEW MFA BEAR:     Layer 0 (bear screen + real option chain) → Grok upside-risk → Claude confirm → Top 4 BCS
+
+═══════════════════════════════════════════════════════════════════
+THE WIN-RATE ↔ PAYOFF CHOICE (--profile) — PICK ONE
+═══════════════════════════════════════════════════════════════════
+A safer (low-delta) short strike wins more often but collects less credit. You cannot maximize both.
+ PROFILE    short Δ band   CWR floor   ~POP     character
+ winrate*   0.13–0.20      ≥ 0.09      ~80–85%  highest win rate (default; "success rate paramount")
+ balanced   0.20–0.28      ≥ 0.18      ~73–78%  practitioner default
+ payoff     0.30–0.38      ≥ 0.26      ~63–68%  best risk:reward per trade, lower win rate
+*default. POP is delta-implied (theoretical), capped 85% — NOT a measured win rate.
+
+═══════════════════════════════════════════════════════════════════
+THE 3-STEP WORKFLOW
+═══════════════════════════════════════════════════════════════════
+STEP   WHERE                     WHAT                                          OUTPUT
+0      mfa_layer0.py (code)      Fetch + technicals + Veto #8 + BEAR screen +  Top 4 BCS (chain-verified)
+       NO LLM                    real option chain (strikes/credit/POP)         or STAND DOWN
+1      Grok + MFABear guide      UPSIDE-RISK sentiment on the Top 4 candidates  bull-catalyst / squeeze risk rows
+2      Claude + MFABear guide    Confirm Top 4; drop any with live upside risk  final Top 4 BCS or STAND DOWN
+
+KEY RULE: numbers come from code. LLMs assess RISK (could this rally?) — they never invent strikes/prices.
+
+═══════════════════════════════════════════════════════════════════
+0 │ LAYER 0 + BCS ENGINE   (code, NO LLM)
+═══════════════════════════════════════════════════════════════════
+Run (market open → add --intraday; closed/pre-market → omit it):
+    .venv/bin/python mfa_layer0.py --bearcall --regime --alt --profile winrate --html public/index.html
+    .venv/bin/python mfa_layer0.py TICK1 TICK2 ... --bearcall --profile balanced --sections
+    .venv/bin/python mfa_layer0.py --bearcall --profile payoff --intraday --json out.json
+
+WHAT IT DOES (all in code):
+ • Veto #8 data-integrity gate (UNCHANGED from V6) runs first — bad price data dropped.
+ • BEAR SUITABILITY FILTER (cheap): reject bullish ribbon, price>EMA21&55, macd_hist>0,
+   ema_spread>3%, RSI>60 or <30, ADX≥25 w/o bearish ribbon, headroom outside 1.5–12%,
+   within 3% of 52w high, ATR<1.5%, hv_rank<50. RVOL polarity FLIPS: high RVOL = DANGER, not GO.
+ • BEAR-CALL SUITABILITY SCORE 0–100 (A trend30 / B premium25 / C geometry20 / D liquidity15 /
+   E no-catalyst10) with per-category floors. Need ≥70 + all floors + chain-verified + no veto.
+ • OPTION CHAIN (survivors only, MANDATORY): pick short strike at the profile's delta (BS delta from
+   snapshot IV), above resistance; size the long leg for the CWR floor; compute credit/width/POP/BE;
+   verify option liquidity (OI≥250, vol≥50, leg spread ≤10%).
+ • Rank by score → TOP 4 tradeable BCS. Fewer than 4 → publish fewer. Zero → STAND DOWN.
+
+★ TERMINAL STATES (empty = system working, NOT failing):
+   STRONG BULL REGIME → BLOCK all entries. NO CHAIN / wide option spreads → STAND DOWN.
+   0 names ≥70 with a clean chain → STAND DOWN. (Common on bullish/quiet tape — do NOT force 4.)
+
+VETOES (any one = no trade): V1 earnings in [today, expiry+2d] OR unknown earnings · V2 bullish
+momentum (macd>0 rising / RSI>60 / stacked-up) · V3 regime>+6 · V4 bullish ribbon or ema_spread>4% ·
+V5 no-chain / CWR<floor / iv-rv<1 · V6 liquidity · V7 short-interest≥20% or DTC≥5 (global) · V8 data.
+
+═══════════════════════════════════════════════════════════════════
+1 │ GROK — UPSIDE-RISK SENTIMENT   (Grok + MFABear guide)
+═══════════════════════════════════════════════════════════════════
+Run on the Top-4 candidates (or survivors). Grok assesses what could make them RALLY (the danger).
+
+I have attached the MFABear V1 Comprehensive Guide. Run BEAR-CALL upside-risk analysis.
+These are bear call spread candidates — they WIN if the stock stays BELOW the short strike. You are
+given verified numbers from a deterministic feed; do NOT re-quote/correct any number. Assess RISK only.
+
+TICKERS (bear-call candidates): [paste Top-4 / survivors]
+
+For each, assess what could make it RALLY through the short strike:
+ (1) bullish social momentum / unusual hype last 48h; (2) imminent bullish catalysts (launch,
+ conference, analyst day, buyback, activist); (3) short-squeeze chatter; (4) upgrade cycle /
+ call-buying narrative; (5) is the bearish thesis crowded (contrarian-rally risk)?
+Apply FRESHNESS (discard >72h) + pump/squeeze circuit-breakers.
+
+OUTPUT one row per ticker:
+ TICKER | Bull-Momentum% | Squeeze risk (L/M/H) | Imminent bull catalyst? | Bear-thesis crowded? |
+ UpsideRisk score(/5, 5=dangerous) | Narrative
+
+→ Paste the upside-risk table into Step 2.
+
+═══════════════════════════════════════════════════════════════════
+2 │ CLAUDE — CONFIRM TOP 4   (New chat + MFABear guide)
+═══════════════════════════════════════════════════════════════════
+New Claude chat. Attach MFABear guide. Paste Layer 0 Sections M/B/C + SECTION BCS + Grok upside-risk.
+
+I have attached the MFABear V1 Comprehensive Guide. GOAL: confirm the TOP 4 BEAR CALL SPREADS.
+A bear call spread keeps the credit if price stays BELOW the short strike. Win rate is high but
+payoff is asymmetric (max loss > max gain) — be conservative.
+
+════ REGIME ════  [paste regime line; bear calls want flat/down tape; broad bull BLOCKS]
+════ LAYER 0 DATA (deterministic — DO NOT re-quote) ════
+SECTION M / B / C: [paste]
+SECTION BCS (chain-verified spreads): [paste]
+════ UPSIDE-RISK SENTIMENT (Grok): [paste]
+
+INSTRUCTIONS:
+ 0. Veto #8 passed in Layer 0; SECTION BCS strikes/credit/delta are chain-verified — do NOT invent strikes.
+ 1. Per candidate confirm: bearish/neutral trend, short strike above resistance, NO earnings before
+    expiry, NO squeeze, credit/width ≥ profile floor.
+ 2. Use Grok UpsideRisk to DOWNGRADE/REJECT any name with a live bullish catalyst or high squeeze risk.
+ 3. Confirm TOP 4 (or fewer). Any unresolved upside risk → drop it.
+ 4. ZERO safe → STAND DOWN. Do NOT manufacture a Top 4 on bullish tape.
+ 5. HONESTY: POP is delta-implied, capped 85%, not a measured win rate; pair with R:R. Management:
+    take ~50% credit, stop ~2× credit, close before earnings.
+
+OUTPUT: confirmed Top 4 BCS (ticker, short→long, credit/width, POP, breakeven, DTE, why-safe +
+upside-risk note, management plan). Or STAND DOWN.
+
+═══════════════════════════════════════════════════════════════════
+QUICK REFERENCE
+═══════════════════════════════════════════════════════════════════
+BEAR CALL SPREAD: sell OTM call + buy higher call → CREDIT. Win if price ≤ short strike at expiry.
+ max profit = credit · max loss = width − credit · breakeven = short strike + credit
+STRIKES/EXPIRY: short Δ per profile (winrate 0.13–0.20), above resistance · swing 30–40 DTE (default)
+ / 21–45 ok / weekly 5–9 only if not bullish · long leg sized for CWR floor.
+MANAGEMENT: take profit ~50% credit · stop ~2× credit · roll for credit only · CLOSE BEFORE EARNINGS ·
+ swing time-stop DTE≤7 · naked calls banned · ≤1–2% risk/trade, ≤6% aggregate, ≤2 BCS/sector.
+REGIME: FAVORABLE (down/weak/VIX 18–28) full count, bar unchanged · NEUTRAL count-capped ·
+ HOSTILE (broad bull, VIX<13) BLOCK · VIX both-tails block (<13 thin / >30–35 crisis-gap).
+HONESTY: POP delta-implied (theoretical) capped 85% ≠ win rate · negative skew (loss>gain) ·
+ STAND DOWN is common & correct on bullish tape — never loosen a gate to fill 4 slots.
+
+───────────────────────────────────────────────────────────────────
+MFA BEAR V1 · Layer 0 (code, real chain) → Grok (upside risk) → Claude (confirm) · "numbers=code,
+risk=LLM · POP≠win rate · negative skew · over-reject cheap, under-reject ruinous · STAND DOWN ok"
+───────────────────────────────────────────────────────────────────

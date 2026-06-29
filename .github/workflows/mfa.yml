@@ -1,0 +1,91 @@
+name: MFA Bear Daily Report
+
+on:
+  schedule:
+    # Times are UTC. US Pacific = UTC-7 (PDT, Mar–Nov) or UTC-8 (PST, Nov–Mar).
+    # Pre-market ~6:00 AM PT (EOD RVOL basis), runs WITHOUT --intraday.
+    #   6:00 AM PDT = 13:00 UTC. (PST/winter: 6:00 AM PST = 14:00 UTC → change "7 13" to "7 14".)
+    - cron: "7 13 * * 1-5"
+    # Mid-session ~7:00 AM PT (intraday RVOL). 7:00 AM PDT = 14:00 UTC.
+    #   (PST/winter: 7:00 AM PST = 15:00 UTC → change "7 14" to "7 15".)
+    - cron: "7 14 * * 1-5"
+  workflow_dispatch:        # "Run workflow" button — manual trigger from GitHub web/mobile app
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# allow only one concurrent deploy
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Decide slot + intraday flag
+        id: mode
+        run: |
+          # US market open ~13:30–20:00 UTC (PDT). The ~7 AM PT mid-session run lands at 14:00 UTC
+          # (inside the window) → intraday RVOL; the ~6 AM PT pre-market run at 13:00 UTC is before
+          # the open → EOD basis. Self-detect from the clock so manual runs pick a sensible slot too.
+          H=$(date -u +%H); M=$(date -u +%M)
+          MINS=$((10#$H * 60 + 10#$M))
+          if [ "$MINS" -ge 810 ] && [ "$MINS" -le 1200 ]; then
+            echo "flag=--intraday"   >> "$GITHUB_OUTPUT"
+            echo "slot=midsession"   >> "$GITHUB_OUTPUT"
+            echo "other=premarket"   >> "$GITHUB_OUTPUT"
+          else
+            echo "flag="             >> "$GITHUB_OUTPUT"
+            echo "slot=premarket"    >> "$GITHUB_OUTPUT"
+            echo "other=midsession"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate 3-profile reports
+        env:
+          # Finnhub free-tier key (reliable forward earnings date + price cross-check).
+          # Add it under repo Settings → Secrets and variables → Actions → New repository secret,
+          # name FINNHUB_API_KEY. If unset, the run still works keyless (yfinance/FRED only).
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+        run: |
+          mkdir -p public
+          BASE="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          # Carry forward the OTHER slot's 3 already-published profile files (the whole Pages site
+          # is replaced each deploy). Best-effort — first-ever run 404s gracefully.
+          for p in winrate balanced payoff; do
+            curl -fsSL "$BASE/${{ steps.mode.outputs.other }}-$p.html" \
+              -o "public/${{ steps.mode.outputs.other }}-$p.html" \
+              || echo "no prior ${{ steps.mode.outputs.other }}-$p.html yet"
+          done
+          # This run: build all 3 profiles for THIS slot + index.html (redirects to winrate).
+          python mfa_layer0.py --bearcall --regime --alt ${{ steps.mode.outputs.flag }} \
+            --all-profiles --slot ${{ steps.mode.outputs.slot }} --out-dir public --json
+          # Static landing page linking every report (committed in repo root).
+          cp history.html public/history.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,1172 @@
+#!/usr/bin/env python3
+"""
+MFA Layer 0 — Deterministic Market-Data Layer
+==============================================
+
+The fix for the MFA pipeline's #1 failure mode: LLMs hallucinating live prices.
+
+This module is the deterministic numeric spine. It NEVER asks an LLM for a number.
+It fetches OHLCV / splits / earnings from a market-data API (yfinance), computes
+every technical locally from the price series, and runs the data-integrity gate
+(the re-homed Step 1.5 + Veto #8) IN CODE — as bounds checks, not a model debate.
+
+Output is a signed, timestamped table of clean rows that downstream Grok-sentiment
+and Claude-scoring prompts consume. LLMs may read these numbers; they may never
+originate them.
+
+Usage:
+    python mfa_layer0.py                      # default ticker set
+    python mfa_layer0.py AAPL MSFT NVDA       # explicit tickers
+    python mfa_layer0.py --json out.json      # also write JSON
+
+Indicators are computed by hand (pandas/numpy) for transparency and so a
+dependency bump can't silently change a number. Every formula is auditable below.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+import urllib.request
+import urllib.error
+from dataclasses import dataclass, asdict, field
+from datetime import datetime, timezone, date, timedelta
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+# ── MFA V5 thresholds (single source of truth — matches the guide) ────────────
+ADV_FLOOR_SHARES = 2_000_000      # Veto #6 liquidity floor
+RVOL_GATE = 1.50                  # mandatory RVOL > 150% breakout gate
+ATH_TOLERANCE = 1.02              # price > ATH * 1.02 = physically impossible
+MAX_DAY_JUMP = 0.40               # >40% single-day move w/o split = suspect
+BETA_FLAG = 1.5                   # Veto #7 high-beta flag
+STALE_DAYS = 5                    # quote older than this many calendar days = stale
+HOLD_WINDOW_DAYS = 11             # Veto #1: max swing hold (10 trading days) + 1 buffer
+FRED_TIMEOUT = 8                  # seconds; FRED is optional — fail fast, never block the run
+
+DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META",
+                   "GOOGL", "TSLA", "PLTR", "CRWD", "HOOD"]
+BENCHMARK = "SPY"
+
+
+# ── Indicator math (computed locally; never from an LLM) ──────────────────────
+def ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def rsi(close: pd.Series, length: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / length, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def macd(close: pd.Series, fast=12, slow=26, signal=9):
+    macd_line = ema(close, fast) - ema(close, slow)
+    signal_line = ema(macd_line, signal)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+def true_range(df: pd.DataFrame) -> pd.Series:
+    high, low, prev_close = df["High"], df["Low"], df["Close"].shift(1)
+    return pd.concat([(high - low),
+                      (high - prev_close).abs(),
+                      (low - prev_close).abs()], axis=1).max(axis=1)
+
+
+def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    return true_range(df).ewm(alpha=1 / length, adjust=False).mean()
+
+
+def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    up = df["High"].diff()
+    down = -df["Low"].diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = true_range(df)
+    atr_ = tr.ewm(alpha=1 / length, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(alpha=1 / length, adjust=False).mean() / atr_
+    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1 / length, adjust=False).mean() / atr_
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, np.nan)
+    return dx.ewm(alpha=1 / length, adjust=False).mean()
+
+
+def beta_vs_benchmark(stock_close: pd.Series, bench_close: pd.Series) -> float:
+    sr = stock_close.pct_change().dropna()
+    br = bench_close.pct_change().dropna()
+    joined = pd.concat([sr, br], axis=1, join="inner").dropna()
+    if len(joined) < 30:
+        return float("nan")
+    cov = np.cov(joined.iloc[:, 0], joined.iloc[:, 1])
+    return float(cov[0, 1] / cov[1, 1]) if cov[1, 1] else float("nan")
+
+
+def _mins_since_open(ts):
+    """Minutes elapsed since the 9:30 ET open for a tz-aware timestamp."""
+    return (ts.hour - 9) * 60 + (ts.minute - 30)
+
+
+def compute_rvol_intraday(tk):
+    """Time-of-day-normalized RVOL: today's cumulative volume up to the CURRENT
+    point in the session vs. the average cumulative volume up to the SAME point
+    across the prior ~20 sessions.
+
+    Self-detects how far into the day we are from the latest 5-minute bar — no
+    hard-coded clock time, so it is correct whenever it is run.
+
+    Returns (rvol, status):
+      status 'intraday'  → today's session is in progress / just closed; normalized.
+      status 'full_day'  → only one (today's) intraday session available; partial-day
+                           cumulative vs prior full days would mislead, so caller should
+                           fall back to the daily-bar RVOL instead.
+      Returns (nan, 'no_intraday') if 5-minute data is unavailable.
+    """
+    try:
+        h = yf.Ticker(tk).history(period="30d", interval="5m")
+    except Exception:
+        return float("nan"), "no_intraday"
+    if h is None or h.empty:
+        return float("nan"), "no_intraday"
+    try:
+        h = h.tz_convert("America/New_York")
+    except Exception:
+        pass
+
+    mins = np.array([_mins_since_open(t) for t in h.index])
+    day = h.index.normalize()
+    vol = h["Volume"].to_numpy()
+    uniq_days = sorted(pd.unique(day))
+    if len(uniq_days) < 2:
+        return float("nan"), "full_day"          # not enough history to normalize
+
+    today = uniq_days[-1]
+    prior_days = uniq_days[:-1][-20:]            # up to 20 prior sessions
+    today_mask = (day == today)
+    cutoff = int(mins[today_mask].max())          # how far into the day we are, auto-detected
+
+    vol_today = float(vol[today_mask & (mins <= cutoff)].sum())
+    cum_prior = []
+    for d in prior_days:
+        dmask = (day == d)
+        cum_prior.append(float(vol[dmask & (mins <= cutoff)].sum()))
+    avg_to_cutoff = float(np.mean(cum_prior)) if cum_prior else float("nan")
+    if not avg_to_cutoff or math.isnan(avg_to_cutoff):
+        return float("nan"), "full_day"
+    return round(vol_today / avg_to_cutoff, 2), "intraday"
+
+
+# ── Phase 0 regime (deterministic metrics; others flagged for feed/estimate) ──
+def _interp(x, lo, hi):
+    """Linear map x in [lo, hi] -> [-5, +5], clamped. lo may exceed hi (inverted)."""
+    if hi == lo:
+        return 0.0
+    t = (x - lo) / (hi - lo)
+    return round(max(-5.0, min(5.0, -5 + 10 * t)), 1)
+
+
+def _parse_fred_csv(text):
+    """Parse a FRED fredgraph CSV into (latest_value, prior_5obs_value, n_obs).
+
+    FRED CSV format: header line 'observation_date,SERIESID' then 'YYYY-MM-DD,value'
+    rows; missing values are '.'. Pure-function so it is testable without network.
+    Returns (None, None, 0) if nothing usable is found.
+    """
+    rows = []
+    for line in text.strip().splitlines():
+        parts = line.split(",")
+        if len(parts) < 2:
+            continue
+        val = parts[-1].strip()
+        if val in (".", "", "value") or parts[0].strip().lower().startswith("observation"):
+            continue
+        try:
+            rows.append(float(val))
+        except ValueError:
+            continue
+    if not rows:
+        return None, None, 0
+    latest = rows[-1]
+    prior = rows[-6] if len(rows) >= 6 else rows[0]
+    return latest, prior, len(rows)
+
+
+def fetch_fred(series_id):
+    """Fetch a FRED series CSV (no API key). Returns (latest, prior5, n) or (None,None,0).
+
+    Network-optional: any failure (timeout, blocked, 4xx) returns the empty tuple so
+    the regime simply falls back to 'NEEDS FEED/ESTIMATE' rather than crashing.
+    """
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (mfa-layer0)"})
+        with urllib.request.urlopen(req, timeout=FRED_TIMEOUT) as resp:
+            text = resp.read().decode("utf-8", "replace")
+        return _parse_fred_csv(text)
+    except Exception:
+        return None, None, 0
+
+
+# Sector ETFs (canonical sector-rotation breadth) and a broad large-cap basket (breadth proxy).
+SECTOR_ETFS = ["XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE", "XLC"]
+BREADTH_BASKET = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "TSLA", "JPM", "V",
+                  "UNH", "XOM", "JNJ", "WMT", "MA", "PG", "HD", "COST", "ORCL", "BAC",
+                  "KO", "PEP", "CVX", "MRK", "ADBE", "CRM", "NFLX", "AMD", "TMO", "ABBV"]
+PUTCALL_PROXY_ETFS = ["SPY", "QQQ", "IWM"]   # aggregate index ETF put/call OI (coarse positioning)
+
+
+def _regime_hist(sym, period="1y"):
+    """Close series for a regime symbol, or None on any failure (network-optional)."""
+    try:
+        h = yf.Ticker(sym).history(period=period)
+        return h["Close"].dropna() if len(h) else None
+    except Exception:
+        return None
+
+
+def regime_sector_rotation():
+    """CANONICAL: fraction of the 11 SPDR sector ETFs trading above their own 50-DMA.
+    Broad participation (most sectors above) = risk-on; narrow = risk-off. Returns
+    (metric_dict) with score in [-5,+5] or s=None if too few ETFs resolve."""
+    above = total = 0
+    for etf in SECTOR_ETFS:
+        c = _regime_hist(etf, "6mo")
+        if c is None or len(c) < 50:
+            continue
+        total += 1
+        if float(c.iloc[-1]) > float(c.tail(50).mean()):
+            above += 1
+    if total < 7:                      # need most sectors present to be meaningful
+        return {"n": "Sector rotation (% sectors >50DMA)", "v": "no data", "s": None}
+    frac = above / total
+    return {"n": "Sector rotation (% sectors >50DMA)",
+            "v": f"{above}/{total} sectors ({frac*100:.0f}%)",
+            "s": _interp(frac, 0.30, 0.70)}   # 30% above -> -5, 70% above -> +5
+
+
+def regime_breadth_proxy():
+    """PROXY (labeled): fraction of a ~30-name large-cap basket above its 200-DMA.
+    A stand-in for the true $SPXA200R breadth index, which has no free feed. Value
+    string is prefixed 'proxy:' so the report never presents it as canonical."""
+    above = total = 0
+    for sym in BREADTH_BASKET:
+        c = _regime_hist(sym, "1y")
+        if c is None or len(c) < 200:
+            continue
+        total += 1
+        if float(c.iloc[-1]) > float(c.tail(200).mean()):
+            above += 1
+    if total < 20:
+        return {"n": "Market breadth (%>200DMA)", "v": "no data", "s": None}
+    frac = above / total
+    return {"n": "Market breadth (%>200DMA)",
+            "v": f"proxy: {above}/{total} (>{frac*100:.0f}% above 200DMA)",
+            "s": _interp(frac, 0.30, 0.70)}
+
+
+def regime_fed_proxy(use_fred=True):
+    """PROXY (labeled): Fed-funds level + 3-month trajectory from FRED DFF.
+    Falling/low rates = supportive (risk-on), rising/high = restrictive. Not the
+    qualitative FOMC stance, so labeled 'proxy:'. Needs FRED; None if unavailable."""
+    if not use_fred:
+        return {"n": "Fed / macro backdrop", "v": "NEEDS FEED/ESTIMATE", "s": None}
+    latest, prior, n = fetch_fred("DFF")
+    if latest is None:
+        return {"n": "Fed / macro backdrop", "v": "NEEDS FEED/ESTIMATE", "s": None}
+    # level: 5.5%+ restrictive -> -, <=2% accommodative -> +
+    s_level = _interp(latest, 5.5, 2.0)
+    # trajectory nudge: prior is ~5 obs back (DFF is daily, so coarse) — cutting is bullish
+    if prior is not None:
+        if latest < prior - 0.10:
+            s_level = min(5.0, s_level + 1.5)   # easing
+        elif latest > prior + 0.10:
+            s_level = max(-5.0, s_level - 1.5)  # tightening
+    traj = ("easing" if prior is not None and latest < prior - 0.10 else
+            "tightening" if prior is not None and latest > prior + 0.10 else "steady")
+    return {"n": "Fed / macro backdrop", "v": f"proxy: DFF {latest:.2f}% ({traj})",
+            "s": round(s_level, 1)}
+
+
+def regime_putcall_proxy():
+    """PROXY (labeled): aggregate nearest-expiry put/call OI across SPY/QQQ/IWM.
+    Contrarian: very high put/call (fear) -> bullish for tape; very low (greed) ->
+    bearish. Coarse vs the CBOE equity put/call series, so labeled 'proxy:'."""
+    put_oi = call_oi = 0.0
+    got = 0
+    for etf in PUTCALL_PROXY_ETFS:
+        try:
+            tk = yf.Ticker(etf)
+            exps = tk.options
+            if not exps:
+                continue
+            ch = tk.option_chain(exps[0])
+            call_oi += float(ch.calls["openInterest"].fillna(0).sum())
+            put_oi += float(ch.puts["openInterest"].fillna(0).sum())
+            got += 1
+        except Exception:
+            continue
+    if got == 0 or call_oi <= 0:
+        return {"n": "Equity put/call (contrarian)", "v": "NEEDS FEED/ESTIMATE", "s": None}
+    pc = put_oi / call_oi
+    # contrarian: pc 0.7 (greed) -> -5, pc 1.3 (fear) -> +5
+    return {"n": "Equity put/call (contrarian)", "v": f"proxy: P/C OI {pc:.2f}",
+            "s": _interp(pc, 0.7, 1.3)}
+
+
+def regime_bull_thrust(metrics):
+    """Deterministic strong-bull detector from ONLY the accurate, always-free metrics
+    (SPY vs 50DMA, VIX level, VIX term structure). Independent of N>=9 so the bull-tape
+    safety brake still fires on a thin-data day. Returns (is_thrust: bool, why: str).
+
+    Fires when the tape is unambiguously risk-on: SPY meaningfully above its 50DMA AND
+    VIX calm AND term structure in contango. That is exactly when selling calls is most
+    dangerous, so it force-enables the V3 veto regardless of the macro metric count."""
+    def val(name):
+        for m in metrics:
+            if m["n"].startswith(name):
+                return m
+        return None
+    spy = val("SPY vs 50DMA")
+    vix = val("VIX level")
+    term = val("VIX term")
+    try:
+        spy_pct = float(spy["v"].rstrip("%")) if spy and spy["s"] is not None else None
+        vix_lvl = float(vix["v"].split()[0]) if vix and vix["s"] is not None else None
+        term_ratio = float(term["v"]) if term and term["s"] is not None else None
+    except (ValueError, TypeError, AttributeError, IndexError):
+        return False, ""
+    if spy_pct is None or vix_lvl is None or term_ratio is None:
+        return False, ""
+    if spy_pct > 2.0 and vix_lvl < 16.0 and term_ratio < 0.95:
+        return True, (f"bull thrust: SPY +{spy_pct:.1f}% vs 50DMA, VIX {vix_lvl:.1f}<16, "
+                      f"term {term_ratio:.2f} contango")
+    return False, ""
+
+
+def compute_regime(use_fred=True):
+    """Score the regime metrics that have a deterministic free source.
+
+    Returns metrics: list[dict] with keys n/v/s (s in [-5,+5] or None). V6 requires
+    N>=9 of 12 valid metrics for a non-Neutral regime. Canonical metrics (SPY, VIX,
+    credit, curve, DXY, VIX-term, sector rotation) carry full weight; three are
+    explicitly LABELED proxies (breadth, Fed, put/call) so the report never overstates
+    them; economic-surprise and NYSE A/D have no free feed and stay NEEDS FEED. We NEVER
+    fabricate a value here.
+    """
+    def hist(sym, period="6mo"):
+        return _regime_hist(sym, period)
+
+    metrics = []
+
+    # 1. SPY vs 50-day SMA  (-5: >5% below ... +5: >3% above)
+    spy = hist("^GSPC", "6mo")
+    if spy is not None and len(spy) >= 50:
+        sma50 = spy.tail(50).mean()
+        pct = (spy.iloc[-1] - sma50) / sma50 * 100
+        metrics.append({"n": "SPY vs 50DMA", "v": f"{pct:+.1f}%", "s": _interp(pct, -5, 3)})
+    else:
+        metrics.append({"n": "SPY vs 50DMA", "v": "no data", "s": None})
+
+    # 2. VIX level (-5: >30 ... +5: <16). Direction noted.
+    vix = hist("^VIX", "1mo")
+    if vix is not None and len(vix):
+        lvl = float(vix.iloc[-1])
+        rising = len(vix) >= 5 and lvl > float(vix.iloc[-5])
+        metrics.append({"n": "VIX level", "v": f"{lvl:.1f} {'rising' if rising else 'falling'}",
+                        "s": _interp(lvl, 30, 16)})
+    else:
+        metrics.append({"n": "VIX level", "v": "no data", "s": None})
+
+    # 8. Credit spreads — FRED HY OAS (BAMLH0A0HYM2), in %  (-5: >6.5% or +0.75 spike ... +5: <3.25 & tightening)
+    if use_fred:
+        hy, hy_prior, hy_n = fetch_fred("BAMLH0A0HYM2")
+    else:
+        hy, hy_prior, hy_n = None, None, 0
+    if hy is not None:
+        spike = (hy - hy_prior) if hy_prior is not None else 0.0
+        # base score on level; if a sharp 5-obs spike, pull toward bear
+        s = _interp(hy, 6.5, 3.25)
+        if spike >= 0.75:
+            s = min(s, -4.0)
+        metrics.append({"n": "Credit spreads (HY OAS)", "v": f"{hy:.2f}% ({spike:+.2f})", "s": s})
+    else:
+        metrics.append({"n": "Credit spreads (HY OAS)", "v": "NEEDS FEED/ESTIMATE", "s": None})
+
+    # 9. Yield curve — prefer FRED 10Y-2Y (T10Y2Y); fall back to yfinance 10Y-13wk proxy
+    tnx, irx = hist("^TNX", "1mo"), hist("^IRX", "1mo")
+    fred_curve = fetch_fred("T10Y2Y") if use_fred else (None, None, 0)
+    if fred_curve[0] is not None:
+        spread = fred_curve[0]
+        metrics.append({"n": "Yield curve (10Y-2Y, FRED)", "v": f"{spread:+.2f}pp",
+                        "s": _interp(spread, -0.5, 0.75)})
+    elif tnx is not None and irx is not None and len(tnx) and len(irx):
+        spread = float(tnx.iloc[-1]) / 10 - float(irx.iloc[-1]) / 10
+        metrics.append({"n": "Yield curve (10Y-13wk proxy)", "v": f"{spread:+.2f}pp",
+                        "s": _interp(spread, -0.5, 0.75)})
+    else:
+        metrics.append({"n": "Yield curve", "v": "NEEDS FEED/ESTIMATE", "s": None})
+
+    # 10. US Dollar (DXY) 20d momentum  (-5: +4% shock ... +5: falling)
+    dxy = hist("DX-Y.NYB", "3mo")
+    if dxy is not None and len(dxy) >= 20:
+        mom = (dxy.iloc[-1] - dxy.iloc[-20]) / dxy.iloc[-20] * 100
+        metrics.append({"n": "DXY 20d momentum", "v": f"{mom:+.1f}%", "s": _interp(mom, 4, -4)})
+    else:
+        metrics.append({"n": "DXY 20d momentum", "v": "no data", "s": None})
+
+    # 12. VIX term structure VIX/VIX3M  (-5: >=1.05 backwardation ... +5: <=0.90 contango)
+    vix3m = hist("^VIX3M", "1mo")
+    if vix is not None and vix3m is not None and len(vix) and len(vix3m):
+        ratio = float(vix.iloc[-1]) / float(vix3m.iloc[-1])
+        metrics.append({"n": "VIX term (VIX/VIX3M)", "v": f"{ratio:.3f}", "s": _interp(ratio, 1.05, 0.90)})
+    else:
+        metrics.append({"n": "VIX term (VIX/VIX3M)", "v": "no data", "s": None})
+
+    # ── Newly-sourced metrics (Group B) ──────────────────────────────────────
+    # Sector rotation: CANONICAL (sector ETFs vs their 50DMA).
+    metrics.append(regime_sector_rotation())
+    # Three LABELED proxies — counted toward N but value-prefixed 'proxy:' in output.
+    metrics.append(regime_breadth_proxy())
+    metrics.append(regime_fed_proxy(use_fred=use_fred))
+    metrics.append(regime_putcall_proxy())
+
+    # Genuinely unsourced for free — stay honest (do NOT fabricate).
+    for name in ["NYSE advance/decline", "Economic Surprise Index"]:
+        metrics.append({"n": name, "v": "NEEDS FEED/ESTIMATE", "s": None})
+
+    return metrics
+
+
+def regime_summary(metrics):
+    """Return the one-line regime verdict string (used by both console + HTML)."""
+    valid = [m for m in metrics if m["s"] is not None]
+    n = len(valid)
+    if n >= 9:
+        score = round(2 * sum(m["s"] for m in valid) / n)
+        band = ("Bull" if score >= 6 else "Mild Bull" if score >= 2 else
+                "Neutral" if score > -2 else "Mild Bear" if score > -6 else "Bear")
+        return f"RegimeScore = {score} → band: {band} (N={n} ≥9 ✔)"
+    partial = round(2 * sum(m["s"] for m in valid) / n) if n else 0
+    return (f"Only N={n} of 12 metrics sourced (need ≥9). Partial avg {partial} → "
+            f"FORCED NEUTRAL (±15) per V6 §0A until ≥9 are present. The bull-tape brake still "
+            f"applies from the always-free metrics (SPY/VIX/term). Unsourced-for-free: "
+            f"NYSE A/D, Economic-Surprise Index.")
+
+
+def print_regime(metrics):
+    print("\n" + "=" * 78)
+    print("PHASE 0 — REGIME (deterministic metrics; others need feed/estimate per V6 §0B)")
+    print("=" * 78)
+    for m in metrics:
+        s = f"{m['s']:+.1f}" if m["s"] is not None else "  —"
+        print(f"  {m['n']:<30}{m['v']:>22}   score {s}")
+    print("\n  " + regime_summary(metrics))
+
+
+# ── Result container ──────────────────────────────────────────────────────────
+@dataclass
+class TickerRow:
+    ticker: str
+    ok: bool = True
+    conflicts: list = field(default_factory=list)   # integrity failures (Veto #8)
+    flags: list = field(default_factory=list)        # non-fatal notes
+    # manifest
+    last_split: str = ""
+    ath: float = float("nan")
+    low_52w: float = float("nan")
+    high_52w: float = float("nan")
+    next_earnings: str = ""
+    earnings_source: str = ""            # 'finnhub' (preferred) or 'yfinance' or '' (none)
+    earnings_in_window: bool = False     # Veto #1: earnings inside the hold window
+    adv: float = float("nan")
+    # live numbers
+    price: float = float("nan")
+    as_of: str = ""
+    price_xcheck: str = ""               # Finnhub quote cross-check note (informational only)
+    # technicals
+    ema_ribbon: str = ""
+    ema_spread_pct: float = float("nan")
+    macd_hist: float = float("nan")
+    rsi14: float = float("nan")
+    atr_pct: float = float("nan")
+    adx14: float = float("nan")
+    rvol: float = float("nan")
+    rvol_basis: str = "daily"        # 'intraday' (time-of-day normalized) or 'daily' (full-day)
+    beta: float = float("nan")
+    # screens
+    passes_rvol_gate: bool = False
+    passes_adv_floor: bool = False
+    # alt-data (Section B) — only real fields; unavailable ones stay N/A, never estimated
+    short_pct_float: float = float("nan")
+    short_days_to_cover: float = float("nan")
+    short_trend: str = ""            # rising / falling vs prior month
+    insider_net_shares: float = float("nan")   # buys − sells, last ~6mo
+    insider_note: str = ""
+    putcall_oi: float = float("nan")  # put OI / call OI, nearest expiry
+    dark_pool: str = "N/A (no free feed)"
+    gex: str = "N/A (no free feed)"
+    # ── Bear Call Spread (BCS) fields — bearcall edition ─────────────────────
+    # cheap, price-derived
+    resistance: float = float("nan")
+    headroom_pct: float = float("nan")
+    pct_below_52w_high: float = float("nan")
+    rv20: float = float("nan")
+    hv_rank: float = float("nan")
+    macd_hist_slope: float = float("nan")
+    rvol_flag: str = ""
+    bcs_score: float = float("nan")
+    bcs_cat: dict = field(default_factory=dict)
+    bcs_suitable: bool = False
+    bcs_suit_fail: list = field(default_factory=list)
+    bcs_vetoes: list = field(default_factory=list)
+    # option-chain-derived (mandatory to publish a trade)
+    short_strike: float = float("nan")
+    long_strike: float = float("nan")
+    width: float = float("nan")
+    credit: float = float("nan")
+    cwr: float = float("nan")
+    breakeven: float = float("nan")
+    short_delta: float = float("nan")
+    short_iv: float = float("nan")
+    iv_rv_ratio: float = float("nan")
+    pop: float = float("nan")
+    opt_liq_ok: bool = False
+    strike_basis: str = ""
+    bcs_expiry: str = ""
+    bcs_dte: int = 0
+    bcs_kind: str = ""
+    bcs_profile: str = ""
+    bcs_tradeable: bool = False
+
+
+def _scalar(x):
+    """yfinance can hand back 1-element Series; coerce to float safely."""
+    if isinstance(x, pd.Series):
+        x = x.iloc[-1] if len(x) else float("nan")
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def fetch_alt_data(tk, row):
+    """Populate Section B fields that have a REAL free source (yfinance).
+
+    Honest scope: short interest, insider net activity, and put/call OI ratio are
+    genuinely available. Dark-pool prints and true dealer-gamma GEX have no free
+    feed, so they stay N/A — we never estimate them (a fabricated GEX is worse
+    than no GEX). Any failure leaves the field as NaN/N-A; it is never guessed.
+    """
+    try:
+        info = tk.info or {}
+    except Exception:
+        info = {}
+
+    spf = info.get("shortPercentOfFloat")
+    if isinstance(spf, (int, float)):
+        row.short_pct_float = round(spf * 100, 2)
+    sr = info.get("shortRatio")
+    if isinstance(sr, (int, float)):
+        row.short_days_to_cover = round(sr, 2)
+    cur, prior = info.get("sharesShort"), info.get("sharesShortPriorMonth")
+    if isinstance(cur, (int, float)) and isinstance(prior, (int, float)) and prior:
+        row.short_trend = "rising" if cur > prior * 1.02 else "falling" if cur < prior * 0.98 else "flat"
+
+    # insider net (buys − sells) from the last ~6 months of Form 4 rows
+    try:
+        it = tk.insider_transactions
+        if it is not None and len(it) and "Text" in it.columns:
+            buys = sells = 0.0
+            for _, r in it.head(40).iterrows():
+                txt = str(r.get("Text", "")).lower()
+                sh = r.get("Shares", 0) or 0
+                try:
+                    sh = float(sh)
+                except (TypeError, ValueError):
+                    continue
+                if "buy" in txt or "purchase" in txt:
+                    buys += sh
+                elif "sale" in txt or "sell" in txt:
+                    sells += sh
+            row.insider_net_shares = round(buys - sells, 0)
+            row.insider_note = ("net buying" if buys > sells else
+                                "net selling" if sells > buys else "flat")
+    except Exception:
+        pass
+
+    # put/call open-interest ratio from the nearest expiry (contrarian/positioning read)
+    try:
+        exps = tk.options
+        if exps:
+            ch = tk.option_chain(exps[0])
+            call_oi = float(ch.calls["openInterest"].fillna(0).sum())
+            put_oi = float(ch.puts["openInterest"].fillna(0).sum())
+            if call_oi > 0:
+                row.putcall_oi = round(put_oi / call_oi, 2)
+    except Exception:
+        pass
+
+
+def analyze(ticker: str, bench_hist: pd.DataFrame, alt: bool = False,
+            intraday: bool = False, bearcall: bool = False,
+            regime_score: float = None, profile: str = "winrate",
+            bull_thrust: bool = False) -> TickerRow:
+    row = TickerRow(ticker=ticker)
+    tk = yf.Ticker(ticker)
+
+    hist = tk.history(period="1y", auto_adjust=False)
+    if hist.empty or len(hist) < 60:
+        row.ok = False
+        row.conflicts.append("insufficient history from feed")
+        return row
+
+    close = hist["Close"]
+    price = _scalar(close.iloc[-1])
+    as_of = hist.index[-1].to_pydatetime()
+    row.price = round(price, 2)
+    row.as_of = as_of.strftime("%Y-%m-%d")
+
+    # ── manifest (from the feed, NOT an LLM) ─────────────────────────────────
+    # True all-time high from full history. period="max" is one cheap call, and
+    # yfinance always split-adjusts highs/lows (auto_adjust only governs dividends),
+    # so old pre-split peaks are already correct and won't cause false conflicts.
+    # Fall back to the 1y high only if the full-history pull fails.
+    try:
+        full = tk.history(period="max", auto_adjust=False)
+        row.ath = round(_scalar(full["High"].max()), 2) if not full.empty \
+            else round(_scalar(hist["High"].max()), 2)
+    except Exception:
+        row.ath = round(_scalar(hist["High"].max()), 2)
+    row.low_52w = round(_scalar(close.tail(252).min()), 2)
+    row.high_52w = round(_scalar(close.tail(252).max()), 2)
+    row.adv = round(_scalar(hist["Volume"].tail(20).mean()), 0)
+
+    splits = tk.splits
+    if splits is not None and len(splits):
+        s_date = splits.index[-1]
+        row.last_split = f"{_scalar(splits.iloc[-1]):g}:1 ({s_date.date()})"
+    else:
+        row.last_split = "none"
+
+    earn_date = None
+    # Prefer Finnhub's forward earnings calendar (verified reliable) when a key is present;
+    # fall back to yfinance tk.calendar (often stale/empty) otherwise. This is what makes the
+    # V1 earnings-over-full-trade-life veto trustworthy. Finnhub failure → silent fallback.
+    try:
+        import finnhub_data
+        fh_earn = finnhub_data.next_earnings(ticker)
+    except Exception:
+        fh_earn = None
+    if fh_earn:
+        try:
+            earn_date = date.fromisoformat(fh_earn)
+            row.next_earnings = fh_earn
+            row.earnings_source = "finnhub"
+        except (ValueError, TypeError):
+            earn_date = None
+    if earn_date is None:
+        try:
+            cal = tk.calendar
+            ed = None
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+                if isinstance(ed, (list, tuple)) and ed:
+                    ed = ed[0]
+            if ed is not None:
+                earn_date = getattr(ed, "date", lambda: ed)()
+                row.next_earnings = str(earn_date)
+                row.earnings_source = "yfinance"
+            else:
+                row.next_earnings = "unknown"
+        except Exception:
+            row.next_earnings = "unknown"
+
+    # Veto #1 — earnings inside the hold window [today, today + HOLD_WINDOW_DAYS]
+    if isinstance(earn_date, date):
+        today = datetime.now(timezone.utc).date()
+        if today <= earn_date <= today + timedelta(days=HOLD_WINDOW_DAYS):
+            row.earnings_in_window = True
+
+    # ── technicals (computed locally) ────────────────────────────────────────
+    e = {span: _scalar(ema(close, span).iloc[-1]) for span in (8, 13, 21, 34, 55, 89)}
+    ribbon_up = e[8] > e[13] > e[21] > e[34] > e[55] > e[89]
+    ribbon_dn = e[8] < e[13] < e[21] < e[34] < e[55] < e[89]
+    row.ema_spread_pct = round((e[8] - e[89]) / e[89] * 100, 2) if e[89] else float("nan")
+    row.ema_ribbon = "bullish" if ribbon_up else "bearish" if ribbon_dn else "mixed"
+
+    _, _, hist_macd = macd(close)
+    row.macd_hist = round(_scalar(hist_macd.iloc[-1]), 3)
+    row.rsi14 = round(_scalar(rsi(close).iloc[-1]), 1)
+    row.atr_pct = round(_scalar(atr(hist).iloc[-1]) / price * 100, 2) if price else float("nan")
+    row.adx14 = round(_scalar(adx(hist).iloc[-1]), 1)
+
+    # RVOL — full-day baseline (volume so far ÷ 20d avg full-day volume).
+    # NOTE: intraday this UNDER-reads (partial day vs full-day avg). When --intraday
+    # is set we replace it with a time-of-day-normalized value that is comparable to
+    # the >150% gate at any point in the session.
+    vol_today = _scalar(hist["Volume"].iloc[-1])
+    vol_avg20 = _scalar(hist["Volume"].tail(20).mean())
+    row.rvol = round(vol_today / vol_avg20, 2) if vol_avg20 else float("nan")
+    row.rvol_basis = "daily"
+    if intraday:
+        iv, status = compute_rvol_intraday(ticker)
+        if status == "intraday" and not math.isnan(iv):
+            row.rvol = iv
+            row.rvol_basis = "intraday"
+        # else: keep daily fallback (market closed / no intraday history)
+    row.beta = round(beta_vs_benchmark(close, bench_hist["Close"]), 2)
+
+    # ── DATA-INTEGRITY GATE (re-homed Step 1.5 / Veto #8, all in code) ───────
+    age_days = (datetime.now(timezone.utc) - as_of.replace(tzinfo=timezone.utc)).days
+    if as_of.year != datetime.now(timezone.utc).year:
+        row.conflicts.append(f"stale: quote year {as_of.year} != current")
+    elif age_days > STALE_DAYS:
+        row.flags.append(f"quote {age_days}d old (feed may be EOD/closed market)")
+
+    if not (row.low_52w * 0.98 <= price <= row.high_52w * 1.02):
+        row.conflicts.append(
+            f"price {price:.2f} outside 52w [{row.low_52w:.2f}, {row.high_52w:.2f}]")
+
+    if price > row.ath * ATH_TOLERANCE:
+        row.conflicts.append(f"price {price:.2f} > ATH*{ATH_TOLERANCE} ({row.ath:.2f}) — impossible")
+
+    # Finnhub quote cross-check (informational only — yfinance stays authoritative for the
+    # series). Flags a large yf-vs-Finnhub divergence so a stale/odd snapshot is visible; it
+    # never overrides the price or creates a hard conflict. No key → skipped silently.
+    try:
+        import finnhub_data
+        q = finnhub_data.quote(ticker)
+        if q and q.get("current") and price:
+            diff_pct = abs(q["current"] - price) / price * 100
+            if diff_pct >= 3.0:
+                row.price_xcheck = f"⚠ yf ${price:.2f} vs Finnhub ${q['current']:.2f} ({diff_pct:.1f}% diff)"
+                row.flags.append(row.price_xcheck)
+            else:
+                row.price_xcheck = f"✓ Finnhub ${q['current']:.2f} ({diff_pct:.1f}% diff)"
+    except Exception:
+        pass
+
+    day_moves = close.pct_change().abs().tail(252)
+    split_dates = set(splits.index.date) if (splits is not None and len(splits)) else set()
+    for dt, mv in day_moves.items():
+        if mv > MAX_DAY_JUMP and dt.date() not in split_dates:
+            row.flags.append(f">{MAX_DAY_JUMP:.0%} 1-day move {dt.date()} ({mv:.0%}) w/o split")
+            break
+
+    # ── screens (MFA V5 hard gates, as code filters) ─────────────────────────
+    row.passes_rvol_gate = row.rvol >= RVOL_GATE if not math.isnan(row.rvol) else False
+    row.passes_adv_floor = row.adv >= ADV_FLOOR_SHARES if not math.isnan(row.adv) else False
+    if not row.passes_adv_floor:
+        row.flags.append(f"ADV {row.adv:,.0f} < {ADV_FLOOR_SHARES:,} floor (Veto #6)")
+    if row.beta > BETA_FLAG:
+        row.flags.append(f"beta {row.beta} > {BETA_FLAG} (Veto #7 flag)")
+    if row.earnings_in_window:
+        row.flags.append(f"earnings {row.next_earnings} in {HOLD_WINDOW_DAYS}d hold window (Veto #1)")
+
+    row.ok = len(row.conflicts) == 0
+    if (alt or bearcall) and row.ok:
+        fetch_alt_data(tk, row)
+
+    # ── Bear Call Spread pipeline (bearcall edition) ─────────────────────────
+    if bearcall and row.ok:
+        run_bcs_step(tk, row, close, e, profile, regime_score, bull_thrust)
+    return row
+
+
+def run_bcs_step(tk, row, close, emas, profile, regime_score, bull_thrust=False):
+    """Run the profile-DEPENDENT bear-call pipeline on an already-fetched/cleared row.
+
+    Split out of analyze() so a multi-profile driver can fetch each ticker's data ONCE and
+    then evaluate all three profiles cheaply (the cheap metrics + chain pull are re-done per
+    profile because strike selection is delta-band-specific, but no extra price-history calls
+    are needed). Mutates and returns `row`."""
+    import bearcall_logic as bcs
+    prof = bcs.get_profile(profile)
+    bcs.compute_bcs_cheap(row, close, emas)
+    row.bcs_suitable, row.bcs_suit_fail = bcs.bear_call_suitable(row, emas)
+    if row.bcs_suitable:
+        # pull the real option chain and build the structure (mandatory to publish)
+        bcs.select_bcs(tk, row, prof)
+    # score (premium category upgrades once chain verified)
+    row.bcs_score, row.bcs_cat, floors_ok = bcs.bear_call_score(row, emas)
+    row.bcs_vetoes = bcs.bcs_vetoes(row, regime_score, prof, bull_thrust=bull_thrust)
+    row.bcs_profile = profile
+    row.bcs_tradeable = bool(
+        row.bcs_suitable and floors_ok and not row.bcs_vetoes
+        and row.strike_basis == "chain" and row.bcs_score >= bcs.BCS_MIN_SCORE)
+    return row
+
+
+def select_bcs_top4(rows):
+    """Tradeable bear-call candidates, ranked by score desc; max 4. Empty → STAND DOWN."""
+    elig = [r for r in rows if r.ok and getattr(r, "bcs_tradeable", False)]
+    elig.sort(key=lambda r: r.bcs_score, reverse=True)
+    return elig[:4]
+
+
+ALL_PROFILES = ("winrate", "balanced", "payoff")
+
+
+def _index_redirect(slot, default_profile, run_ts, results):
+    """A tiny landing page: meta-refreshes to {slot}-{default_profile}.html, but also shows
+    one-tap links to all 3 profiles for this slot + the history page (so a bookmark of '/'
+    always lands on the freshest default report yet exposes the alternatives)."""
+    target = f"{slot}-{default_profile}.html"
+    links = "\n".join(
+        f'<a class="card" href="{slot}-{p}.html"><b>{p.capitalize()}</b> — Top '
+        f'{len(results.get(p, []))}: {", ".join(results.get(p, [])) or "STAND DOWN"}</a>'
+        for p in ALL_PROFILES)
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0; url={target}">
+<title>MFA Bear — latest</title>
+<style>body{{margin:0;background:#0f1115;color:#e6e8eb;font:16px/1.5 -apple-system,sans-serif;padding:18px}}
+a.card{{display:block;background:#1a1d24;border:1px solid #262a33;border-radius:12px;padding:14px;margin:10px 0;color:#e6e8eb;text-decoration:none}}
+.mut{{color:#9aa0aa;font-size:13px}}</style></head><body>
+<h1>🐻 MFA Bear — latest ({slot})</h1>
+<div class="mut">Redirecting to the {default_profile} report… or pick a profile:</div>
+{links}
+<a class="card" href="history.html">📜 All reports / history</a>
+<div class="mut">Generated {run_ts}. Numbers code-sourced; ~15-min delayed; confirm at broker.</div>
+</body></html>"""
+
+
+def build_profile_reports(tickers, bench, regime_metrics, regime_sum, regime_score_val,
+                          bull_thrust, run_ts, out_dir, slot, alt=False, intraday=False,
+                          json_out=False):
+    """Fetch each ticker's data ONCE, then evaluate + render all three profiles for one slot.
+
+    Writes {out_dir}/{slot}-{profile}.html for each profile (and optional JSON). Returns a
+    dict {profile: top4_list}. This is the engine behind the every-run-builds-3-reports
+    requirement — the expensive price-history fetch happens once per ticker, and only the
+    delta-band-specific BCS step (incl. the option-chain pull) repeats per profile."""
+    import os
+    from report_html import build_html
+
+    # Stage 1 — fetch + integrity + technicals ONCE per ticker (bearcall=False so the
+    # profile-specific BCS step is deferred). Keep the per-ticker close/emas for reuse.
+    base_rows, ctx = [], {}
+    for t in tickers:
+        try:
+            tk = yf.Ticker(t)
+            row = analyze(t, bench, alt=alt, intraday=intraday, bearcall=False,
+                          regime_score=regime_score_val, bull_thrust=bull_thrust)
+            base_rows.append(row)
+            if row.ok:
+                hist = tk.history(period="1y", auto_adjust=False)
+                close = hist["Close"]
+                emas = {span: _scalar(ema(close, span).iloc[-1]) for span in (8, 13, 21, 34, 55, 89)}
+                ctx[t] = (tk, close, emas)
+        except Exception as ex:
+            r = TickerRow(ticker=t, ok=False)
+            r.conflicts.append(f"fetch/compute error: {repr(ex)[:120]}")
+            base_rows.append(r)
+
+    # Stage 2 — per profile, deep-copy rows and run the profile-specific BCS step + render.
+    import copy
+    results = {}
+    for profile in ALL_PROFILES:
+        prof_rows = []
+        for row in base_rows:
+            r = copy.deepcopy(row)
+            if r.ok and r.ticker in ctx:
+                tk, close, emas = ctx[r.ticker]
+                run_bcs_step(tk, r, close, emas, profile, regime_score_val, bull_thrust)
+            prof_rows.append(r)
+        top4 = select_bcs_top4(prof_rows)
+        results[profile] = [r.ticker for r in top4]
+        html_doc = build_html(prof_rows, regime_metrics, regime_sum, run_ts,
+                              profile=profile, top4=top4, slot=slot)
+        fname = os.path.join(out_dir, f"{slot}-{profile}.html")
+        with open(fname, "w") as fh:
+            fh.write(html_doc)
+        print(f"  · wrote {fname}  (Top {len(top4)}: {', '.join(results[profile]) or 'STAND DOWN'})")
+        if json_out:
+            jname = os.path.join(out_dir, f"{slot}-{profile}.json")
+            with open(jname, "w") as fh:
+                json.dump({"run_ts": run_ts, "slot": slot, "profile": profile,
+                           "top4": results[profile],
+                           "rows": [asdict(r) for r in prof_rows]}, fh, indent=2, default=str)
+    return results
+
+
+def print_bcs(rows, profile="winrate"):
+    """Console Bear Call Spread report."""
+    import bearcall_logic as bcs
+    p = bcs.get_profile(profile)
+    print("\n" + "=" * 78)
+    print(f"BEAR CALL SPREAD SCREEN  ·  profile={profile} "
+          f"(short Δ {p['delta_lo']:.2f}-{p['delta_hi']:.2f}, CWR floor {p['cwr_floor']})")
+    print("=" * 78)
+    cleared = [r for r in rows if r.ok]
+    print(f"{'TICK':<6}{'SCORE':>6}{'SUIT':>6}{'STRUCT':>14}{'CWR':>6}{'POP':>6}  VETOES / FAIL")
+    for r in cleared:
+        suit = "✔" if r.bcs_suitable else "✘"
+        struct = r.strike_basis or "—"
+        cwr = f"{r.cwr:.2f}" if not math.isnan(r.cwr) else "—"
+        pop = f"{r.pop:.0f}%" if not math.isnan(r.pop) else "—"
+        note = ""
+        if r.bcs_vetoes:
+            note = "VETO: " + "; ".join(r.bcs_vetoes[:2]) + ("…" if len(r.bcs_vetoes) > 2 else "")
+        elif not r.bcs_suitable:
+            note = "unsuit: " + "; ".join(r.bcs_suit_fail[:2]) + ("…" if len(r.bcs_suit_fail) > 2 else "")
+        score = f"{r.bcs_score:.0f}" if not math.isnan(r.bcs_score) else "—"
+        print(f"{r.ticker:<6}{score:>6}{suit:>6}{struct:>14}{cwr:>6}{pop:>6}  {note}")
+
+    top4 = select_bcs_top4(rows)
+    print("\n" + "-" * 78)
+    if not top4:
+        print("TOP 4 BEAR CALL SPREADS: ⛔ STAND DOWN — 0 tradeable candidates.")
+        print("(Expected on bullish/quiet tape, or when no chain-verified structure clears the gates.)")
+    else:
+        print(f"TOP {len(top4)} BEAR CALL SPREADS (tradeable, chain-verified):")
+        for r in top4:
+            print(f"  {r.ticker} — BCS {r.bcs_score:.0f} | {r.bcs_kind} {r.bcs_dte}DTE ({r.bcs_expiry}) "
+                  f"| short ${r.short_strike:.0f}/long ${r.long_strike:.0f} "
+                  f"| credit ${r.credit:.2f} / width ${r.width:.0f} (CWR {r.cwr:.2f}) "
+                  f"| POP ~{r.pop:.0f}% (0.{int(r.short_delta*100):02d}Δ, theoretical) "
+                  f"| BE ${r.breakeven:.2f}")
+        print("\nPOP is delta-implied (theoretical), not a measured win rate — capped honesty: "
+              "real win rate is reduced by drift, gaps, slippage. R:R is asymmetric (loss > gain).")
+    return top4
+
+
+def emit_mfa_sections(rows, run_ts):
+    """Emit Gemini-replacement Section M / C / E in the exact MFA cheatsheet format.
+
+    These are paste-ready for the Claude scoring step. Because the numbers come
+    from code, the Grok Step-1.5 audit is no longer needed — integrity already
+    passed in Layer 0. Only CLEARED rows are emitted as survivors.
+    """
+    cleared = [r for r in rows if r.ok]
+    today = datetime.now(timezone.utc).date()
+    is_russell = (today.month == 6 and today.weekday() == 4 and today.day >= 25)  # last-Fri-June heuristic
+
+    out = []
+    out.append(f"# MFA LAYER 0 OUTPUT (deterministic feed · {run_ts}) — replaces Gemini Sections M/C/E\n")
+
+    out.append("SECTION M — PRE-HOOK MANIFEST")
+    for r in cleared:
+        out.append(
+            f"{r.ticker:<6}| last split: {r.last_split} | ATH ≈ ${r.ath:.2f} "
+            f"| 52w range: ${r.low_52w:.2f}–${r.high_52w:.2f} "
+            f"| next earnings: {r.next_earnings} | ADV ≈ {r.adv/1e6:.1f}M")
+
+    out.append("\nSECTION B — ALT DATA")
+    has_alt = any(not math.isnan(r.short_pct_float) or not math.isnan(r.putcall_oi)
+                  or not math.isnan(r.insider_net_shares) for r in cleared)
+    if not has_alt:
+        out.append("(run with --alt to populate; all fields N/A — score Alt category as N/A per V6 §0B)")
+    else:
+        out.append("TICKER | Dark Pool | Options Flow (P/C OI) | GEX | SI% float + DTC | Insider (6mo)")
+        for r in cleared:
+            sif = (f"{r.short_pct_float:.2f}% / {r.short_days_to_cover:.1f}d ({r.short_trend})"
+                   if not math.isnan(r.short_pct_float) else "N/A")
+            pc = f"P/C OI {r.putcall_oi:.2f}" if not math.isnan(r.putcall_oi) else "N/A"
+            ins = (f"{r.insider_net_shares:+,.0f} sh ({r.insider_note})"
+                   if not math.isnan(r.insider_net_shares) else "N/A")
+            out.append(f"{r.ticker} | {r.dark_pool} | {pc} | {r.gex} | {sif} | {ins}")
+        out.append("NOTE: Dark Pool + GEX = N/A (no free feed) — NOT estimated. Score Alt category on "
+                   "available fields only, or mark Alt N/A and renormalize Tech/Sent per V6 §0B.")
+
+    out.append("\nSECTION C — TECHNICALS")
+    out.append("TICKER | Price + Timestamp | split/ATH/52w reconciliation | EMA Ribbon | "
+               "MACD | RSI | ATR% | RVOL% (calendar?) | ADX | Earnings | Beta")
+    for r in cleared:
+        recon = (f"price ${r.price:.2f} (as of {r.as_of}); split {r.last_split}; "
+                 f"ATH ${r.ath:.2f}; within 52w ✔")
+        macd_txt = "bull (hist+)" if r.macd_hist > 0 else "bear (hist−)"
+        ribbon = {"bullish": "+ribbon up", "bearish": "−ribbon down", "mixed": "mixed"}[r.ema_ribbon]
+        rvol_txt = f"{r.rvol*100:.0f}%"
+        rvol_txt += " (calendar-driven)" if (is_russell and r.rvol >= RVOL_GATE) else ""
+        rvol_txt += " [intraday]" if r.rvol_basis == "intraday" else " [EOD]"
+        beta_txt = f"{r.beta:.2f}" + (" ⚠(V7)" if r.beta > BETA_FLAG else "")
+        earn_txt = r.next_earnings + (" ⚠(V1 in-window)" if r.earnings_in_window else "")
+        out.append(
+            f"{r.ticker} | ${r.price:.2f} ({r.as_of}) | {recon} | {ribbon} ({r.ema_spread_pct:+.1f}%) "
+            f"| {macd_txt} | {r.rsi14:.0f} | {r.atr_pct:.1f}% | {rvol_txt} | {r.adx14:.0f} "
+            f"| {earn_txt} | {beta_txt}")
+
+    out.append("\nSECTION E — SURVIVOR LIST")
+    out.append("SURVIVORS: " + ", ".join(r.ticker for r in cleared))
+    out.append("\nNOTE: numbers are code-sourced (yfinance) and passed the in-code integrity gate. "
+               "Skip Grok Step 1.5 (model-vs-model audit) — it is superseded by Layer 0.")
+    return "\n".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="MFA Layer 0 — deterministic market-data layer")
+    ap.add_argument("tickers", nargs="*", default=DEFAULT_TICKERS,
+                    help="tickers to analyze (default: MFA test set)")
+    ap.add_argument("--json", metavar="PATH", nargs="?", const="__AUTO__", default=None,
+                    help="also write JSON. Bare --json: auto-name (per-profile in --all-profiles "
+                         "mode, or layer0_out.json otherwise). --json PATH: explicit file (single-profile).")
+    ap.add_argument("--sections", action="store_true",
+                    help="emit paste-ready MFA Section M/C/E (Gemini-step replacement)")
+    ap.add_argument("--alt", action="store_true",
+                    help="fetch real Section B alt-data (short interest, insider, put/call OI)")
+    ap.add_argument("--regime", action="store_true",
+                    help="compute deterministic Phase 0 regime metrics (VIX/DXY/curve/term/SPY + FRED)")
+    ap.add_argument("--no-fred", action="store_true",
+                    help="skip FRED credit-spread/yield-curve fetch (offline / blocked network)")
+    ap.add_argument("--intraday", action="store_true",
+                    help="use time-of-day-normalized RVOL (run this when the market is open)")
+    ap.add_argument("--html", metavar="PATH",
+                    help="write a self-contained mobile HTML report with copy-to-Grok/Claude wizard")
+    ap.add_argument("--bearcall", action="store_true",
+                    help="run the Bear Call Spread screen (bearish-to-neutral credit spreads)")
+    ap.add_argument("--profile", default="winrate", choices=["winrate", "balanced", "payoff"],
+                    help="BCS risk profile: winrate (~0.18Δ/CWR0.09), balanced (~0.24Δ/0.18), payoff (~0.34Δ/0.26)")
+    ap.add_argument("--all-profiles", action="store_true",
+                    help="build all 3 profile reports (winrate/balanced/payoff) for a slot in one run")
+    ap.add_argument("--slot", default="premarket", choices=["premarket", "midsession"],
+                    help="report slot name for --all-profiles output files ({slot}-{profile}.html)")
+    ap.add_argument("--out-dir", default="public",
+                    help="output directory for --all-profiles reports (default: public)")
+    args = ap.parse_args()
+    tickers = args.tickers or DEFAULT_TICKERS
+
+    run_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    print(f"MFA LAYER 0  ·  {run_ts}  ·  source: yfinance (deterministic feed)\n")
+
+    regime_metrics = None
+    regime_sum = "Regime not computed (run with --regime)."
+    regime_score_val = None
+    bull_thrust = False
+    if args.regime or args.html or args.bearcall:
+        regime_metrics = compute_regime(use_fred=not args.no_fred)
+        regime_sum = regime_summary(regime_metrics)
+        valid = [m for m in regime_metrics if m["s"] is not None]
+        if len(valid) >= 9:
+            regime_score_val = round(2 * sum(m["s"] for m in valid) / len(valid))
+        else:
+            regime_score_val = 0   # forced Neutral when <9 metrics (per V6 §0A)
+        # Bull-tape safety brake — fires from the always-free metrics even when N<9.
+        bull_thrust, thrust_why = regime_bull_thrust(regime_metrics)
+        if args.regime:
+            print_regime(regime_metrics)
+            if bull_thrust:
+                print(f"\n  ⚠ BULL-THRUST BRAKE ACTIVE → {thrust_why}\n    (forces V3 veto on all "
+                      "bear-call candidates regardless of N — protects against shorting calls into a bull tape)")
+
+    # ── 3-profile report matrix (every run builds winrate + balanced + payoff) ───
+    if args.all_profiles:
+        import os
+        os.makedirs(args.out_dir, exist_ok=True)
+        bench = yf.Ticker(BENCHMARK).history(period="1y", auto_adjust=False)
+        print(f"\nBuilding 3-profile reports for slot '{args.slot}' → {args.out_dir}/ "
+              f"(intraday={args.intraday})\n")
+        results = build_profile_reports(
+            tickers, bench, regime_metrics, regime_sum, regime_score_val, bull_thrust,
+            run_ts, args.out_dir, args.slot, alt=args.alt, intraday=args.intraday,
+            json_out=bool(args.json))
+        # index.html = landing page that redirects to the default (winrate) report for this slot
+        index_path = os.path.join(args.out_dir, "index.html")
+        with open(index_path, "w") as fh:
+            fh.write(_index_redirect(args.slot, "winrate", run_ts, results))
+        print(f"  · wrote {index_path} (redirects to {args.slot}-winrate.html)")
+        print("\nDone. 3 profile reports + index written.")
+        return
+
+    bench = yf.Ticker(BENCHMARK).history(period="1y", auto_adjust=False)
+    rows = []
+    for t in tickers:
+        try:
+            rows.append(analyze(t, bench, alt=args.alt, intraday=args.intraday,
+                                 bearcall=args.bearcall, regime_score=regime_score_val,
+                                 profile=args.profile, bull_thrust=bull_thrust))
+        except Exception as ex:
+            r = TickerRow(ticker=t, ok=False)
+            r.conflicts.append(f"fetch/compute error: {repr(ex)[:120]}")
+            rows.append(r)
+
+    # ── data-integrity report (Step 1.5, but deterministic) ──────────────────
+    print("=" * 78)
+    print("DATA-INTEGRITY GATE  (CONFLICT = dropped before scoring · Veto #8)")
+    print("=" * 78)
+    print(f"{'TICKER':<7}{'PRICE':>10}{'ATH':>10}{'AS-OF':>13}  VERDICT")
+    cleared, dropped = [], []
+    for r in rows:
+        verdict = "CLEARED" if r.ok else "CONFLICT — " + "; ".join(r.conflicts)
+        (cleared if r.ok else dropped).append(r.ticker)
+        price = f"{r.price:.2f}" if not math.isnan(r.price) else "—"
+        ath = f"{r.ath:.2f}" if not math.isnan(r.ath) else "—"
+        print(f"{r.ticker:<7}{price:>10}{ath:>10}{r.as_of:>13}  {verdict}")
+        for f in r.flags:
+            print(f"{'':<30}  ⚑ {f}")
+
+    # ── technicals table (only on cleared rows; computed locally) ────────────
+    print("\n" + "=" * 78)
+    print("TECHNICALS  (CLEARED tickers only · computed locally from price series)")
+    print("=" * 78)
+    hdr = f"{'TICK':<6}{'PRICE':>9}{'RSI':>6}{'MACDh':>8}{'EMA':>9}{'ATR%':>7}{'ADX':>6}{'RVOL':>7}{'BETA':>6}  GATES"
+    print(hdr)
+    for r in rows:
+        if not r.ok:
+            continue
+        gates = []
+        gates.append("RVOL✔" if r.passes_rvol_gate else "RVOL✘")
+        gates.append("ADV✔" if r.passes_adv_floor else "ADV✘")
+        gates.append("[ID]" if r.rvol_basis == "intraday" else "[EOD]")
+        print(f"{r.ticker:<6}{r.price:>9.2f}{r.rsi14:>6.1f}{r.macd_hist:>8.3f}"
+              f"{r.ema_ribbon:>9}{r.atr_pct:>7.2f}{r.adx14:>6.1f}{r.rvol:>7.2f}"
+              f"{r.beta:>6.2f}  {' '.join(gates)}")
+
+    # ── alt-data table (Section B) — only when --alt; real fields only ───────
+    if args.alt:
+        print("\n" + "=" * 78)
+        print("ALT DATA / SECTION B  (CLEARED only · real fields; unavailable = N/A, never estimated)")
+        print("=" * 78)
+        print(f"{'TICK':<6}{'SI%float':>9}{'DTC':>6}{'SI trend':>10}{'P/C OI':>8}  "
+              f"{'INSIDER (6mo)':<22}{'DARKPOOL':<18}{'GEX'}")
+        for r in rows:
+            if not r.ok:
+                continue
+            sif = f"{r.short_pct_float:.2f}" if not math.isnan(r.short_pct_float) else "N/A"
+            dtc = f"{r.short_days_to_cover:.1f}" if not math.isnan(r.short_days_to_cover) else "N/A"
+            pc = f"{r.putcall_oi:.2f}" if not math.isnan(r.putcall_oi) else "N/A"
+            ins = (f"{r.insider_net_shares:+,.0f} ({r.insider_note})"
+                   if not math.isnan(r.insider_net_shares) else "N/A")
+            print(f"{r.ticker:<6}{sif:>9}{dtc:>6}{r.short_trend or 'N/A':>10}{pc:>8}  "
+                  f"{ins:<26}{r.dark_pool:<20}{r.gex}")
+
+    print("\n" + "-" * 78)
+    print(f"CLEARED ({len(cleared)}): {', '.join(cleared) or '—'}")
+    print(f"DROPPED ({len(dropped)}): {', '.join(dropped) or '—'}")
+    print("\nCleared rows are ready for Grok sentiment + Claude scoring.")
+    print("These numbers came from code, not an LLM. LLMs may consume — never originate — them.")
+
+    if args.json:
+        json_path = "layer0_out.json" if args.json == "__AUTO__" else args.json
+        with open(json_path, "w") as fh:
+            json.dump({"run_ts": run_ts,
+                       "cleared": cleared, "dropped": dropped,
+                       "rows": [asdict(r) for r in rows]}, fh, indent=2, default=str)
+        print(f"\nJSON written to {json_path}")
+
+    if args.bearcall:
+        print_bcs(rows, args.profile)
+
+    if args.sections:
+        print("\n" + "=" * 78)
+        print(emit_mfa_sections(rows, run_ts))
+
+    if args.html:
+        from report_html import build_html
+        top4 = select_bcs_top4(rows) if args.bearcall else []
+        html_doc = build_html(rows, regime_metrics, regime_sum, run_ts,
+                              profile=args.profile, top4=top4)
+        with open(args.html, "w") as fh:
+            fh.write(html_doc)
+        print(f"\nHTML report written to {args.html}")
+
+
+if __name__ == "__main__":
+    main()
