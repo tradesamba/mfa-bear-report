@@ -383,14 +383,25 @@ def select_bcs(tk, row, profile):
         return (b + a) / 2 if (b > 0 and a > 0) else float(c["lastPrice"])
 
     def liquid(c):
+        """Returns (ok: bool, reason: str). reason is '' when ok."""
         oi = float(c["openInterest"]) if not pd.isna(c["openInterest"]) else 0
         vol = float(c["volume"]) if not pd.isna(c["volume"]) else 0
         b, a = float(c["bid"]), float(c["ask"]); m = (a + b) / 2
         rel = (a - b) / m if (a > 0 and b > 0 and m > 0) else 99
-        return oi >= OPT_OI_MIN and vol >= OPT_VOL_MIN and rel <= OPT_SPREAD_MAX
+        fails = []
+        if oi < OPT_OI_MIN:
+            fails.append(f"OI {int(oi)}<{OPT_OI_MIN}")
+        if vol < OPT_VOL_MIN:
+            fails.append(f"vol {int(vol)}<{OPT_VOL_MIN}")
+        if rel > OPT_SPREAD_MAX:
+            fails.append(f"spread {rel:.1%}>{OPT_SPREAD_MAX:.0%}")
+        return (not fails), (", ".join(fails) if fails else "")
 
-    short_ok = liquid(short)
+    short_liq_ok, short_liq_why = liquid(short)
     short_mid = mid(short)
+    if not short_liq_ok:
+        print(f"[BCS liq] {row.ticker} short ${short['strike']:.0f} FAIL: {short_liq_why}"
+              f"  (bid={short['bid']:.2f} ask={short['ask']:.2f} OI={int(short['openInterest'] if not pd.isna(short['openInterest']) else 0)} vol={int(short['volume'] if not pd.isna(short['volume']) else 0)})")
 
     # Long leg: instead of blindly taking the adjacent strike (which gives a tiny CWR on
     # high-priced names), search candidate long strikes and pick the one that best meets
@@ -407,19 +418,22 @@ def select_bcs(tk, row, profile):
         if w <= 0 or cr <= 0:
             continue
         cwr = cr / w
-        cand_liq = liquid(cand)
+        cand_liq_ok, cand_liq_why = liquid(cand)
         # Objective: MAXIMIZE credit/width among candidates that clear the CWR floor AND are
         # liquid (best risk/reward for this defined-risk spread). The boolean rank ensures any
         # floor-clearing+liquid candidate beats any that isn't; CWR breaks ties. If none clear,
         # `best` still holds the highest-CWR structure so the score has something to report —
         # but opt_liq_ok then stays False below and V5/V6 veto it (no silent bad fill).
-        score_key = (cwr >= cwr_floor and cand_liq, cwr)
+        score_key = (cwr >= cwr_floor and cand_liq_ok, cwr)
         if best is None or score_key > best[0]:
-            best = (score_key, cand, w, cr, cwr, cand_liq)
+            best = (score_key, cand, w, cr, cwr, cand_liq_ok, cand_liq_why)
     if best is None:
         row.strike_basis = "no_long_leg"
         return None
-    _, long_leg, width, credit, cwr_val, long_liq = best
+    _, long_leg, width, credit, cwr_val, long_liq, long_liq_why = best
+    if not long_liq:
+        print(f"[BCS liq] {row.ticker} long  ${long_leg['strike']:.0f} FAIL: {long_liq_why}"
+              f"  (bid={long_leg['bid']:.2f} ask={long_leg['ask']:.2f} OI={int(long_leg['openInterest'] if not pd.isna(long_leg['openInterest']) else 0)} vol={int(long_leg['volume'] if not pd.isna(long_leg['volume']) else 0)})")
 
     row.short_strike = round(float(short["strike"]), 2)
     row.long_strike = round(float(long_leg["strike"]), 2)
@@ -434,7 +448,7 @@ def select_bcs(tk, row, profile):
 
     # option liquidity — judged per leg against the leg's OWN mid (standard relative
     # spread), not the net credit. Computed during the width search above.
-    row.opt_liq_ok = bool(short_ok and long_liq)
+    row.opt_liq_ok = bool(short_liq_ok and long_liq)
     row.strike_basis = "chain"
     return row
 

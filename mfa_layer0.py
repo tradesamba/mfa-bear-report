@@ -878,11 +878,14 @@ def run_bcs_step(tk, row, close, emas, profile, regime_score, bull_thrust=False)
     return row
 
 
-def select_bcs_top4(rows):
-    """Tradeable bear-call candidates, ranked by score desc; max 4. Empty → STAND DOWN."""
+def select_bcs_top4(rows, top_n=4):
+    """Tradeable bear-call candidates, ranked by score desc; max top_n.
+    Pass top_n=None (or a large number) to return all tradeables — used when
+    the full candidate list should be embedded in the report for Claude to rank.
+    Empty → STAND DOWN."""
     elig = [r for r in rows if r.ok and getattr(r, "bcs_tradeable", False)]
     elig.sort(key=lambda r: r.bcs_score, reverse=True)
-    return elig[:4]
+    return elig if top_n is None else elig[:top_n]
 
 
 ALL_PROFILES = ("winrate", "balanced", "payoff")
@@ -914,13 +917,16 @@ a.card{{display:block;background:#1a1d24;border:1px solid #262a33;border-radius:
 
 def build_profile_reports(tickers, bench, regime_metrics, regime_sum, regime_score_val,
                           bull_thrust, run_ts, out_dir, slot, alt=False, intraday=False,
-                          json_out=False):
+                          json_out=False, universe_tickers=None):
     """Fetch each ticker's data ONCE, then evaluate + render all three profiles for one slot.
 
     Writes {out_dir}/{slot}-{profile}.html for each profile (and optional JSON). Returns a
     dict {profile: top4_list}. This is the engine behind the every-run-builds-3-reports
     requirement — the expensive price-history fetch happens once per ticker, and only the
-    delta-band-specific BCS step (incl. the option-chain pull) repeats per profile."""
+    delta-band-specific BCS step (incl. the option-chain pull) repeats per profile.
+
+    universe_tickers: the full pre-screened list (passed through to universe_editor.html).
+    """
     import os
     from report_html import build_html
 
@@ -954,20 +960,36 @@ def build_profile_reports(tickers, bench, regime_metrics, regime_sum, regime_sco
                 tk, close, emas = ctx[r.ticker]
                 run_bcs_step(tk, r, close, emas, profile, regime_score_val, bull_thrust)
             prof_rows.append(r)
-        top4 = select_bcs_top4(prof_rows)
-        results[profile] = [r.ticker for r in top4]
+        # Pass all tradeable candidates to the report (Claude selects top 4 from them).
+        # top4 key in D stays for index page display; full bcs array drives Claude's prompt.
+        all_tradeables = select_bcs_top4(prof_rows, top_n=None)
+        results[profile] = [r.ticker for r in all_tradeables[:4]]  # index page shows ≤4
         html_doc = build_html(prof_rows, regime_metrics, regime_sum, run_ts,
-                              profile=profile, top4=top4, slot=slot)
+                              profile=profile, top4=all_tradeables, slot=slot)
         fname = os.path.join(out_dir, f"{slot}-{profile}.html")
         with open(fname, "w") as fh:
             fh.write(html_doc)
-        print(f"  · wrote {fname}  (Top {len(top4)}: {', '.join(results[profile]) or 'STAND DOWN'})")
+        n = len(all_tradeables)
+        print(f"  · wrote {fname}  ({n} tradeable candidate{'s' if n != 1 else ''}: "
+              f"{', '.join(r.ticker for r in all_tradeables) or 'STAND DOWN'})")
         if json_out:
             jname = os.path.join(out_dir, f"{slot}-{profile}.json")
             with open(jname, "w") as fh:
                 json.dump({"run_ts": run_ts, "slot": slot, "profile": profile,
                            "top4": results[profile],
                            "rows": [asdict(r) for r in prof_rows]}, fh, indent=2, default=str)
+
+    # Write the universe editor page (uses winrate profile rows as a representative view)
+    try:
+        from report_html import universe_editor_html
+        editor_tickers = universe_tickers or tickers
+        editor_path = os.path.join(out_dir, "universe_editor.html")
+        with open(editor_path, "w") as fh:
+            fh.write(universe_editor_html(editor_tickers))
+        print(f"  · wrote {editor_path}  ({len(editor_tickers)} tickers in universe editor)")
+    except Exception as ex:
+        print(f"  · universe_editor.html skipped: {ex}")
+
     return results
 
 
@@ -1105,7 +1127,22 @@ def main():
     ap.add_argument("--out-dir", default="public",
                     help="output directory for --all-profiles reports (default: public)")
     args = ap.parse_args()
-    tickers = args.tickers or DEFAULT_TICKERS
+
+    # ── Universe resolution ────────────────────────────────────────────────────
+    # --all-profiles without explicit tickers: load the full universe and pre-screen.
+    # All other paths (single-profile CLI, tests) use DEFAULT_TICKERS or explicit args.
+    universe_tickers = None  # passed through to universe_editor.html
+    if args.all_profiles and not args.tickers:
+        try:
+            from universe import load_universe, cheap_prescreen
+            raw = load_universe()
+            tickers = cheap_prescreen(raw, max_keep=25)
+            universe_tickers = raw  # full list for the editor page
+        except Exception as ex:
+            print(f"[UNIVERSE] pre-screen failed ({ex}), falling back to DEFAULT_TICKERS")
+            tickers = DEFAULT_TICKERS
+    else:
+        tickers = args.tickers or DEFAULT_TICKERS
 
     run_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"MFA LAYER 0  ·  {run_ts}  ·  source: yfinance (deterministic feed)\n")
@@ -1140,7 +1177,7 @@ def main():
         results = build_profile_reports(
             tickers, bench, regime_metrics, regime_sum, regime_score_val, bull_thrust,
             run_ts, args.out_dir, args.slot, alt=args.alt, intraday=args.intraday,
-            json_out=bool(args.json))
+            json_out=bool(args.json), universe_tickers=universe_tickers)
         # index.html = landing page that redirects to the default (winrate) report for this slot
         index_path = os.path.join(args.out_dir, "index.html")
         with open(index_path, "w") as fh:

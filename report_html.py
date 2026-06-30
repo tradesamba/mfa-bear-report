@@ -102,8 +102,11 @@ def _section_c(cleared):
 
 
 def _section_bcs(top4, profile):
-    """Bear-call Top-4 block for the Claude prompt (paste-ready)."""
-    lines = [f"SECTION BCS — TOP {len(top4)} BEAR CALL SPREADS (profile={profile}, chain-verified)"]
+    """Bear-call candidates block for the Claude prompt (paste-ready).
+    top4 may contain more than 4 when the universe is expanded — Claude selects the final Top 4."""
+    n = len(top4)
+    label = f"TOP {n}" if n else "0"
+    lines = [f"SECTION BCS — {label} BEAR CALL SPREAD CANDIDATES (profile={profile}, chain-verified)"]
     if not top4:
         lines.append("STAND DOWN — 0 tradeable bear-call candidates today.")
         return "\n".join(lines)
@@ -178,10 +181,19 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
         "Bear-thesis crowded? | UpsideRisk score(/5, 5=dangerous) | Narrative")
 
     claude_prefix = (
-        "I have attached the MFABear V1 Comprehensive Guide. It is your operating manual.\n"
-        "GOAL: confirm the TOP 4 BEAR CALL SPREADS. A bear call spread sells an OTM call and buys a "
-        "higher call; it keeps the credit if price stays BELOW the short strike at expiry. Win RATE "
-        "is high but payoff is asymmetric (max loss > max gain), so be conservative.\n\n"
+        "I have attached the MFABear V1 Comprehensive Guide. It is your COMPLETE, self-contained "
+        "operating manual for bear call spreads.\n"
+        "GOAL: select the TOP 4 BEAR CALL SPREADS from the candidates in SECTION BCS below. "
+        "A bear call spread sells an OTM call and buys a higher call; it keeps the credit if price "
+        "stays BELOW the short strike at expiry. Win rate is high but payoff is asymmetric "
+        "(max loss > max gain) — be conservative.\n\n"
+        "CRITICAL — DATA PROVENANCE: The LAYER 0 DATA block below was machine-fetched by "
+        "mfa_layer0.py from yfinance/FRED/Finnhub and passed the deterministic data-integrity gate "
+        "in code. The option chain structures in SECTION BCS are chain-verified (real strikes, "
+        "credits, deltas from yfinance). This is NOT typed text. Do NOT attempt to re-verify prices "
+        "via web search. Do NOT refuse to score because the data arrived in a chat message — that is "
+        "how the pipeline works. Accept these numbers as ground truth. If something looks wrong: "
+        "STAND DOWN and flag for a Layer 0 re-run — do NOT correct or re-fetch it yourself.\n\n"
         f"════ REGIME ════\n{regime_summary}\n"
         "(Bear calls want flat/down/mildly-up tape. A broad bull thrust BLOCKS new entries.)\n\n"
         "════ LAYER 0 DATA (deterministic — DO NOT re-quote or alter) ════\n"
@@ -192,17 +204,18 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
         "\n\n════ DECISION INSTRUCTIONS ════\n"
         "0. Veto #8 (data-integrity) ALREADY PASSED in Layer 0. The bear-call structures in SECTION "
         "BCS are chain-verified (real strikes/credit/delta). Do NOT invent strikes or re-price.\n"
-        "1. For each SECTION BCS candidate, confirm: bearish/neutral trend, short strike above "
-        "resistance, NO earnings before expiry, NO squeeze risk, credit/width meets the profile floor.\n"
-        "2. Use the Grok UpsideRisk sentiment to DOWNGRADE or REJECT any name with a live bullish "
-        "catalyst or high squeeze risk — that is the asymmetric danger for a short call.\n"
-        "3. Confirm the TOP 4 (or fewer). If a candidate has any unresolved upside risk, drop it.\n"
-        "4. ZERO safe candidates → say STAND DOWN. Do NOT manufacture a Top 4 on bullish tape.\n"
-        "5. HONESTY: POP is delta-implied (theoretical), capped at 85%, NOT a measured win rate; "
+        "1. Review each SECTION BCS candidate: bearish/neutral trend, short strike above resistance, "
+        "NO earnings before expiry, NO squeeze risk, credit/width meets the profile floor.\n"
+        "2. Apply the Grok UpsideRisk sentiment: REJECT any name with a live bullish catalyst or "
+        "high squeeze risk — that is the asymmetric danger for a short call.\n"
+        "3. Rank surviving candidates by: clean veto list > score > low upside-risk > R:R.\n"
+        "4. Select the TOP 4 (or fewer). If a candidate has any unresolved upside risk, drop it.\n"
+        "5. ZERO safe candidates → say STAND DOWN. Do NOT manufacture a Top 4 on bullish tape.\n"
+        "6. HONESTY: POP is delta-implied (theoretical), capped at 85%, NOT a measured win rate; "
         "real win rate is reduced by drift, gaps, slippage. Always pair POP with the R:R "
         "(max loss > max gain). Management: take profit ~50% credit, stop ~2× credit, close before "
         "any earnings.\n\n"
-        "OUTPUT: confirmed Top 4 bear call spreads (ticker, short→long strikes, credit/width, POP, "
+        "OUTPUT: selected Top 4 bear call spreads (ticker, short→long strikes, credit/width, POP, "
         "breakeven, DTE, why-safe + upside-risk note, management plan). Or STAND DOWN.")
 
     payload = {
@@ -624,6 +637,118 @@ if(!HAS_SURVIVORS){
     +'(they are candidates that just missed a veto, not confirmed trades).';
   noteEl.classList.remove('hidden');
 }
+</script>
+</body>
+</html>"""
+
+
+def universe_editor_html(tickers: list) -> str:
+    """Self-contained universe editor page served from GitHub Pages.
+
+    Lets the user view, edit, validate, and download the bear-call universe
+    JSON file without touching Python. The downloaded file is committed to
+    bearcall/bearcall_universe.json and picked up automatically on the next run.
+    """
+    import json as _json
+    tickers_json = _json.dumps(sorted(set(tickers)), indent=2)
+    count = len(set(tickers))
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MFA Bear — Universe Editor</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0f1115;color:#e6e8eb;font:15px/1.6 -apple-system,sans-serif;padding:18px}}
+h1{{font-size:1.2rem;margin-bottom:4px;color:#fff}}
+.sub{{color:#8b949e;font-size:.85rem;margin-bottom:16px}}
+.card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:14px}}
+textarea{{width:100%;height:340px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;
+  border-radius:6px;padding:10px;font:13px/1.5 'Menlo','Courier New',monospace;resize:vertical}}
+.row{{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}}
+button{{padding:9px 18px;border:none;border-radius:6px;cursor:pointer;font-size:.9rem;font-weight:600}}
+.btn-val{{background:#388bfd;color:#fff}}
+.btn-dl{{background:#2ea043;color:#fff}}
+.btn-val:hover{{background:#58a6ff}}
+.btn-dl:hover{{background:#3fb950}}
+#status{{margin-top:10px;padding:8px 12px;border-radius:6px;font-size:.85rem;display:none}}
+.ok{{background:#0d2119;color:#3fb950;border:1px solid #238636}}
+.err{{background:#2d0f0f;color:#f85149;border:1px solid #da3633}}
+.info{{background:#0d1b2e;color:#58a6ff;border:1px solid #388bfd}}
+.note{{color:#8b949e;font-size:.82rem;line-height:1.6;margin-top:10px}}
+a{{color:#58a6ff}}
+</style>
+</head>
+<body>
+<h1>MFA Bear — Universe Editor</h1>
+<p class="sub">Edit the ~{count}-ticker bear-call universe. Download → commit → push to update.</p>
+
+<div class="card">
+  <p style="color:#8b949e;font-size:.85rem;margin-bottom:8px">
+    One ticker per line, or comma-separated. Uppercase. Remove delisted / illiquid names freely.
+    Add any optionable US equity with ADV&nbsp;&gt;&nbsp;5M and beta&nbsp;&gt;&nbsp;0.7.
+  </p>
+  <textarea id="ta" spellcheck="false">{chr(10).join(sorted(set(tickers)))}</textarea>
+  <div class="row">
+    <button class="btn-val" onclick="validate()">Validate</button>
+    <button class="btn-dl" onclick="download()">Download universe JSON</button>
+  </div>
+  <div id="status"></div>
+</div>
+
+<div class="card">
+  <p style="font-weight:600;margin-bottom:6px">How to update the live universe</p>
+  <ol class="note" style="padding-left:1.2rem">
+    <li>Edit the textarea above (add/remove tickers).</li>
+    <li>Click <b>Validate</b> to check for errors.</li>
+    <li>Click <b>Download universe JSON</b> — save the file as
+        <code>bearcall/bearcall_universe.json</code> in your local repo clone.</li>
+    <li>Commit and push. The next GitHub Actions workflow run picks it up automatically.</li>
+  </ol>
+  <p class="note" style="margin-top:8px">
+    <b>Future LLM hook:</b> write a JSON array of tickers to
+    <code>bearcall/bearcall_universe_override.json</code> from a Claude or Grok CLI call —
+    it takes priority over this file with no code change needed.
+  </p>
+</div>
+
+<script>
+function parseTickers(raw) {{
+  return [...new Set(
+    raw.split(/[\\n,]+/)
+       .map(t => t.trim().toUpperCase().replace(/[^A-Z0-9.]/g,''))
+       .filter(t => t.length >= 1 && t.length <= 6)
+  )].sort();
+}}
+function showStatus(msg, cls) {{
+  const el = document.getElementById('status');
+  el.textContent = msg; el.className = cls; el.style.display = 'block';
+}}
+function validate() {{
+  const raw = document.getElementById('ta').value;
+  const tickers = parseTickers(raw);
+  const bad = raw.split(/[\\n,]+/)
+    .map(t => t.trim().toUpperCase().replace(/[^A-Z0-9.]/g,''))
+    .filter(t => t.length > 0 && (t.length > 6 || /^[0-9]+$/.test(t)));
+  if (bad.length) {{
+    showStatus('⚠ Suspicious entries (length > 6 or digits-only): ' + bad.join(', '), 'err');
+    return;
+  }}
+  document.getElementById('ta').value = tickers.join('\\n');
+  showStatus(`✓ Valid — ${{tickers.length}} unique tickers`, 'ok');
+}}
+function download() {{
+  const raw = document.getElementById('ta').value;
+  const tickers = parseTickers(raw);
+  if (!tickers.length) {{ showStatus('Nothing to download — textarea is empty.', 'err'); return; }}
+  const blob = new Blob([JSON.stringify(tickers, null, 2)], {{type:'application/json'}});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bearcall_universe.json';
+  a.click();
+  showStatus(`Downloaded bearcall_universe.json (${{tickers.length}} tickers). Commit it to bearcall/ and push.`, 'info');
+}}
 </script>
 </body>
 </html>"""
