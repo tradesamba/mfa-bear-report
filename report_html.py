@@ -152,6 +152,10 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
                          "text": ("⚠ Finnhub not used this run (no key / unreachable) — "
                                   "earnings from yfinance, no price cross-check")}
 
+    # FRED data-source badge — mirrors the Finnhub one so both feeds are verifiable at a glance.
+    import mfa_layer0
+    fred_badge = mfa_layer0.fred_badge_status(regime_metrics)
+
     sec_m = _section_m(cleared)
     sec_b = _section_b(cleared)
     sec_c = _section_c(cleared)
@@ -207,6 +211,7 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
         "slot": slot,
         "profile_tabs": profile_tabs,
         "finnhub_badge": finnhub_badge,
+        "fred_badge": fred_badge,
         "survivors": survivors,
         "top4": top4_tickers,
         "bcs": [{"t": r.ticker, "score": r.bcs_score, "kind": r.bcs_kind, "dte": r.bcs_dte,
@@ -283,6 +288,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <h1>🐻 MFA Bear — Bear Call Spreads</h1>
 <div class="mut" id="runts"></div>
 <div class="srcbadge" id="finnhubBadge"></div>
+<div class="srcbadge" id="fredBadge"></div>
 
 <div class="tabs" id="profileTabs"></div>
 
@@ -369,6 +375,10 @@ document.getElementById('runts').textContent = 'Generated ' + D.run_ts + ' · pr
 const fb = D.finnhub_badge || {on:false, text:''};
 const fbEl = document.getElementById('finnhubBadge');
 if(fbEl){ fbEl.textContent = fb.text || ''; fbEl.className = 'srcbadge ' + (fb.on ? 'on' : 'off'); }
+
+const fr = D.fred_badge || {on:false, text:''};
+const frEl = document.getElementById('fredBadge');
+if(frEl){ frEl.textContent = fr.text || ''; frEl.className = 'srcbadge ' + (fr.on ? 'on' : 'off'); }
 
 // profile tab bar (links to sibling-profile reports for this slot)
 const tabs = document.getElementById('profileTabs');
