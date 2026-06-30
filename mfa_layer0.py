@@ -1099,8 +1099,8 @@ def emit_mfa_sections(rows, run_ts):
 
 def main():
     ap = argparse.ArgumentParser(description="MFA Layer 0 — deterministic market-data layer")
-    ap.add_argument("tickers", nargs="*", default=DEFAULT_TICKERS,
-                    help="tickers to analyze (default: MFA test set)")
+    ap.add_argument("tickers", nargs="*", default=None,
+                    help="tickers to analyze (default: universe pre-screen or MFA test set)")
     ap.add_argument("--json", metavar="PATH", nargs="?", const="__AUTO__", default=None,
                     help="also write JSON. Bare --json: auto-name (per-profile in --all-profiles "
                          "mode, or layer0_out.json otherwise). --json PATH: explicit file (single-profile).")
