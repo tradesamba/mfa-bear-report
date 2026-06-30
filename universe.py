@@ -269,14 +269,27 @@ def cheap_prescreen(tickers: list, max_keep: int = PRESCREEN_DEFAULT_KEEP) -> li
                                       f"{EARNINGS_DAYS}d ({earnings_cutoff})")
                 continue
 
-            # Upgrade Stage A IV proxy with actual 52w range from fast_info
+            # Upgrade Stage A score using real 52w range from fast_info.
+            # Bear-call scoring: favour names with high IV *and* meaningful pullback.
+            # Score = IV proxy × pullback factor × log(ADV)
+            # where pullback = (1 - price/52w_high): a name at its 52w high scores 0,
+            # a name 20% below scores 0.20. This ensures the pre-screen passes names
+            # that bear_call_suitable() can actually approve (not at-highs momentum names).
             try:
                 high52 = getattr(info, "year_high", None)
                 low52 = getattr(info, "year_low", None)
-                if high52 and low52 and low52 > 0:
+                price_now = getattr(info, "last_price", None)
+                if high52 and low52 and low52 > 0 and price_now and price_now > 0:
+                    # Hard reject: too close to 52w high — bear_call_suitable will fail these
+                    pct_below_high = (high52 - price_now) / high52
+                    if pct_below_high < 0.10:  # within 10% of 52w high
+                        stage_b_rejects[t] = (f"price {price_now:.2f} within 10% of "
+                                              f"52w high {high52:.2f} ({pct_below_high:.1%} below)")
+                        continue
                     iv_52w = (high52 - low52) / low52
-                    adv_score = math.log(max(scores.get(t, 1), 1))
-                    scores[t] = iv_52w * adv_score
+                    pullback = pct_below_high   # 0.0 (at high) → 1.0 (at low)
+                    adv_score = math.log(max(avg_vol, 1))
+                    scores[t] = iv_52w * pullback * adv_score
             except Exception:
                 pass  # keep Stage A score
 

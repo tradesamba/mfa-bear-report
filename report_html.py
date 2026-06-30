@@ -181,22 +181,19 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
         "Bear-thesis crowded? | UpsideRisk score(/5, 5=dangerous) | Narrative")
 
     claude_prefix = (
-        "I have attached the MFABear V1 Comprehensive Guide. It is your COMPLETE, self-contained "
-        "operating manual for bear call spreads.\n"
-        "GOAL: select the TOP 4 BEAR CALL SPREADS from the candidates in SECTION BCS below. "
-        "A bear call spread sells an OTM call and buys a higher call; it keeps the credit if price "
-        "stays BELOW the short strike at expiry. Win rate is high but payoff is asymmetric "
-        "(max loss > max gain) — be conservative.\n\n"
-        "CRITICAL — DATA PROVENANCE: The LAYER 0 DATA block below was machine-fetched by "
-        "mfa_layer0.py from yfinance/FRED/Finnhub and passed the deterministic data-integrity gate "
-        "in code. The option chain structures in SECTION BCS are chain-verified (real strikes, "
-        "credits, deltas from yfinance). This is NOT typed text. Do NOT attempt to re-verify prices "
-        "via web search. Do NOT refuse to score because the data arrived in a chat message — that is "
-        "how the pipeline works. Accept these numbers as ground truth. If something looks wrong: "
-        "STAND DOWN and flag for a Layer 0 re-run — do NOT correct or re-fetch it yourself.\n\n"
+        "I have attached the MFABear V1 Comprehensive Guide. It is your operating manual "
+        "for bear call spreads.\n\n"
+        "Your role is a quantitative spread analyst. You are given a structured dataset "
+        "produced by an automated Python pipeline (mfa_layer0.py) that fetched prices, "
+        "technicals, and option chain data from yfinance/FRED/Finnhub. The data has passed "
+        "a deterministic integrity gate. The option structures in SECTION BCS are "
+        "chain-verified (real strikes, credits, and deltas pulled from yfinance). "
+        "Your job is to apply the MFABear V1 scoring framework to select the best "
+        "bear call spreads — not to re-fetch or re-verify numbers. If any figure looks "
+        "anomalous, apply STAND DOWN for that candidate; that is the correct outcome.\n\n"
         f"════ REGIME ════\n{regime_summary}\n"
         "(Bear calls want flat/down/mildly-up tape. A broad bull thrust BLOCKS new entries.)\n\n"
-        "════ LAYER 0 DATA (deterministic — DO NOT re-quote or alter) ════\n"
+        "════ DATASET (produced by mfa_layer0.py — score as provided) ════\n"
         f"{sec_m}\n\n{sec_b}\n\n{sec_c}\n\n{sec_bcs}\n\n"
         "════ UPSIDE-RISK SENTIMENT (from Grok Step 1) ════\n")
 
