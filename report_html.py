@@ -137,6 +137,21 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
     profile_tabs = [{"name": p, "href": f"{prefix}{p}.html", "active": (p == profile)}
                     for p in ("winrate", "balanced", "payoff")]
 
+    # Finnhub data-source badge: prove (or disprove) that Finnhub was actually reached this run.
+    # earnings_source is set to 'finnhub' only when Finnhub returned a forward date; price_xcheck
+    # is non-empty only when the Finnhub quote endpoint answered. Summarize across cleared rows.
+    fh_earn = sum(1 for r in cleared if getattr(r, "earnings_source", "") == "finnhub")
+    fh_quote = sum(1 for r in cleared if getattr(r, "price_xcheck", ""))
+    n_clear = len(cleared)
+    if fh_earn or fh_quote:
+        finnhub_badge = {"on": True,
+                         "text": f"✓ Finnhub: {fh_earn}/{n_clear} earnings dates · "
+                                 f"{fh_quote}/{n_clear} price cross-checks"}
+    else:
+        finnhub_badge = {"on": False,
+                         "text": ("⚠ Finnhub not used this run (no key / unreachable) — "
+                                  "earnings from yfinance, no price cross-check")}
+
     sec_m = _section_m(cleared)
     sec_b = _section_b(cleared)
     sec_c = _section_c(cleared)
@@ -191,6 +206,7 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
         "profile": profile,
         "slot": slot,
         "profile_tabs": profile_tabs,
+        "finnhub_badge": finnhub_badge,
         "survivors": survivors,
         "top4": top4_tickers,
         "bcs": [{"t": r.ticker, "score": r.bcs_score, "kind": r.bcs_kind, "dte": r.bcs_dte,
@@ -258,11 +274,15 @@ _TEMPLATE = r"""<!DOCTYPE html>
             font-size:13px; font-weight:600; background:#1a1d24; color:var(--mut); border:1px solid #262a33; }
   .tabs a.active { background:var(--acc); color:#fff; border-color:var(--acc); }
   .tabs .pname { display:block; font-size:11px; font-weight:400; opacity:.8; }
+  .srcbadge { font-size:11px; margin:4px 0 2px; padding:4px 8px; border-radius:7px; display:inline-block; }
+  .srcbadge.on { background:#10331f; color:var(--ok); border:1px solid #1f5c38; }
+  .srcbadge.off { background:#33270f; color:var(--warn); border:1px solid #5c451f; }
 </style>
 </head>
 <body>
 <h1>🐻 MFA Bear — Bear Call Spreads</h1>
 <div class="mut" id="runts"></div>
+<div class="srcbadge" id="finnhubBadge"></div>
 
 <div class="tabs" id="profileTabs"></div>
 
@@ -344,6 +364,11 @@ function row(cells){ const tr=document.createElement('tr'); cells.forEach(c=>{ c
 
 // run timestamp + banner
 document.getElementById('runts').textContent = 'Generated ' + D.run_ts + ' · profile: ' + (D.profile||'winrate');
+
+// Finnhub data-source badge — visible proof of whether the Action reached Finnhub this run
+const fb = D.finnhub_badge || {on:false, text:''};
+const fbEl = document.getElementById('finnhubBadge');
+if(fbEl){ fbEl.textContent = fb.text || ''; fbEl.className = 'srcbadge ' + (fb.on ? 'on' : 'off'); }
 
 // profile tab bar (links to sibling-profile reports for this slot)
 const tabs = document.getElementById('profileTabs');
