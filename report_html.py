@@ -407,6 +407,7 @@ function toggleDbg(){
   if(!p.classList.contains('hidden')) p.scrollIntoView({behavior:'smooth'});
 }
 function _slug(s){ return (s||'').replace(/[^0-9A-Za-z]+/g,'-').replace(/^-|-$/g,''); }
+function _ptStr(){ return new Intl.DateTimeFormat('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',timeZoneName:'short'}).format(new Date()); }
 function buildDebugReport(){
   // Reconstruct the EXACT Claude prompt the wizard produced (incl. the Grok reply the user pasted).
   const grokReply = (document.getElementById('grokReply')||{}).value || '';
@@ -437,7 +438,7 @@ function buildDebugReport(){
   L.push('| run_ts | ' + (D.run_ts||'') + ' |');
   L.push('| report kind | ' + kind + ' |');
   L.push('| page URL | ' + location.href + ' |');
-  L.push('| downloaded at | ' + new Date().toISOString() + ' |');
+  L.push('| downloaded at | ' + _ptStr() + ' |');
   L.push('| user agent | ' + navigator.userAgent + ' |');
   L.push('| debug_schema_version | ' + DEBUG_SCHEMA_VERSION + ' |');
   L.push('');
@@ -493,7 +494,7 @@ function buildDebugReport(){
   L.push(note.trim() || '_(none — general validation requested)_');
   L.push('');
   L.push('## Raw data (lossless — the page\'s embedded D + captured fields)');
-  const bundle = {debug_schema_version: DEBUG_SCHEMA_VERSION, downloaded_at: new Date().toISOString(),
+  const bundle = {debug_schema_version: DEBUG_SCHEMA_VERSION, downloaded_at: _ptStr(),
     page_url: location.href, user_agent: navigator.userAgent,
     grok_reply: grokReply, claude_prompt: claudePrompt, claude_output: claudeOut, user_note: note, D: D};
   L.push('```json\n' + JSON.stringify(bundle, null, 2) + '\n```');
