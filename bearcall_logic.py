@@ -37,7 +37,7 @@ ATR_PCT_FLOOR = 1.5           # absolute premium floor (too quiet = thin credit)
 HV_RANK_FLOOR = 50           # don't sell vol below its own 1y median
 IV_RV_FLOOR = 1.0            # short_iv / realized vol — must be selling rich vol
 OPT_OI_MIN = 250             # per-leg open interest floor
-OPT_VOL_MIN = 50             # per-leg volume floor
+OPT_VOL_MIN = 10             # per-leg volume floor (relaxed from 50 — intraday vol is often 0 for valid strikes)
 OPT_SPREAD_MAX = 0.10         # leg bid/ask spread ≤ 10% of credit
 SQUEEZE_SI_PCT = 20.0         # short % float ≥ this = squeeze veto (global)
 SQUEEZE_DTC = 5.0            # days-to-cover ≥ this = squeeze veto
@@ -208,11 +208,14 @@ def bear_call_suitable(row, emas):
 
     if row.ema_ribbon == "bullish":
         fail.append("ribbon bullish")
-    # raw "mixed" is a fresh-breakout trap unless bearish-confirmed
+    # raw "mixed" is acceptable when momentum is NOT strongly up:
+    # macd_hist ≤ 0 OR RSI < 55 is sufficient to confirm stalling/bearish intent.
+    # (Requiring BOTH EMAs below price AND macd ≤ 0 was too strict — stalling names
+    # can show mixed ribbon with a brief MACD uptick while still being range-bound.)
     if row.ema_ribbon == "mixed":
-        confirmed = (e21 and e55 and price < e21 and price < e55 and row.macd_hist <= 0)
+        confirmed = (row.macd_hist <= 0) or (not math.isnan(row.rsi14) and row.rsi14 < 55)
         if not confirmed:
-            fail.append("mixed ribbon not bearish-confirmed")
+            fail.append("mixed ribbon not bearish-confirmed (macd>0 and RSI≥55)")
     if e21 and e55 and price > e21 and price > e55:
         fail.append("price above EMA21 & EMA55 (not neutral)")
     if row.macd_hist > 0:
@@ -505,7 +508,7 @@ def bcs_vetoes(row, regime_score, profile, bull_thrust=False):
         v.append(f"V7 short interest {row.short_pct_float}% ≥ {SQUEEZE_SI_PCT}")
     if not math.isnan(row.short_days_to_cover) and row.short_days_to_cover >= SQUEEZE_DTC:
         v.append(f"V7 days-to-cover {row.short_days_to_cover} ≥ {SQUEEZE_DTC}")
-    # V7 beta — regime-conditional
-    if row.beta > 1.5 and regime_score is not None and regime_score > 2:
-        v.append("V7 beta>1.5 in risk-on regime")
+    # NOTE: V7 beta veto intentionally omitted for bear calls.
+    # High beta in a bull regime = more vol = richer premium for a credit seller.
+    # Beta is noted in the report for sizing context but does not block the trade.
     return v

@@ -34,6 +34,7 @@ import urllib.request
 import urllib.error
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone, date, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -1144,7 +1145,7 @@ def main():
     else:
         tickers = args.tickers or DEFAULT_TICKERS
 
-    run_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    run_ts = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M %Z")
     print(f"MFA LAYER 0  ·  {run_ts}  ·  source: yfinance (deterministic feed)\n")
 
     regime_metrics = None

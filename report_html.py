@@ -166,7 +166,7 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
 
     grok_focus = top4_tickers or survivors
     grok_prompt = (
-        "I have attached the MFABear V1 Comprehensive Guide. Run BEAR-CALL sentiment analysis.\n"
+        "I have attached the MFABear V2 Comprehensive Guide. Run BEAR-CALL sentiment analysis.\n"
         "These are bear call spread candidates — they WIN if the stock stays BELOW the short strike "
         "(flat/down/mildly-up). You are given verified numbers from a deterministic feed; do NOT "
         "re-quote, update, or correct any number. Your job is sentiment + bullish-CATALYST RISK only.\n\n"
@@ -181,14 +181,14 @@ def build_html(rows, regime_metrics, regime_summary, run_ts, profile="winrate", 
         "Bear-thesis crowded? | UpsideRisk score(/5, 5=dangerous) | Narrative")
 
     claude_prefix = (
-        "I have attached the MFABear V1 Comprehensive Guide. It is your operating manual "
+        "I have attached the MFABear V2 Comprehensive Guide. It is your operating manual "
         "for bear call spreads.\n\n"
         "Your role is a quantitative spread analyst. You are given a structured dataset "
         "produced by an automated Python pipeline (mfa_layer0.py) that fetched prices, "
         "technicals, and option chain data from yfinance/FRED/Finnhub. The data has passed "
         "a deterministic integrity gate. The option structures in SECTION BCS are "
         "chain-verified (real strikes, credits, and deltas pulled from yfinance). "
-        "Your job is to apply the MFABear V1 scoring framework to select the best "
+        "Your job is to apply the MFABear V2 scoring framework to select the best "
         "bear call spreads — not to re-fetch or re-verify numbers. If any figure looks "
         "anomalous, apply STAND DOWN for that candidate; that is the correct outcome.\n\n"
         f"════ REGIME ════\n{regime_summary}\n"
@@ -357,7 +357,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <div class="banner hidden" id="wizardNote" style="background:#33270f;color:var(--warn);border:1px solid var(--warn)"></div>
 
 <div class="card" id="step1">
-  <div class="step">STEP 1 · Copy this into the Grok app (attach the MFABear V1 guide first)</div>
+  <div class="step">STEP 1 · Copy this into the Grok app (attach the MFABear V2 guide first)</div>
   <textarea id="grokBox" readonly></textarea>
   <button onclick="copyEl('grokBox', this)">📋 Copy Grok prompt</button>
 </div>
@@ -369,7 +369,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="card hidden" id="step3">
-  <div class="step">STEP 3 · Copy this into the Claude app (attach the MFABear V1 guide first)</div>
+  <div class="step">STEP 3 · Copy this into the Claude app (attach the MFABear V2 guide first)</div>
   <textarea id="claudeBox" readonly></textarea>
   <button onclick="copyEl('claudeBox', this)">📋 Copy Claude prompt</button>
 </div>
