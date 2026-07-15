@@ -4,14 +4,16 @@ This module owns the full ticker list and the cheap pre-screen that reduces it
 to ~25 survivors before the expensive 1y-history analyze() loop runs.
 
 Flow:
-  load_universe() → 300 tickers
+  load_universe() → ~290 tickers
   cheap_prescreen(tickers, max_keep=25) → 25 survivors
       Stage A: single yf.download(all, period='5d') — batch, fast
                reject: price ≤ 0, notional volume < $50M
                score: 52w-range IV proxy × ADV rank
-               keep top 50
-      Stage B: per-ticker fast_info on top 50 only
+               keep top 75
+      Stage B: per-ticker fast_info + info on top 75 only
                reject: beta > 3.0, earnings within 45 days
+               reject: market cap < $500M  (removes distressed micro-caps)
+               reject: short interest > 30%  (squeeze risk; downstream veto is 20%)
                return top max_keep by score
 
 Override hook (future LLM feed — no code change needed):
@@ -40,6 +42,8 @@ BETA_MAX = 3.0                  # too erratic for defined-risk spread
 EARNINGS_DAYS = 45              # reject if earnings within this many days
 STAGE_A_KEEP = 75               # top N by volume score into Stage B
 PRESCREEN_DEFAULT_KEEP = 25     # final survivors passed to analyze()
+MKTCAP_MIN = 500_000_000        # $500M — removes distressed micro-caps with thin chains
+SI_PCT_MAX = 30.0               # short interest % float — squeeze risk (downstream V7 veto is 20%)
 
 # ── Master universe list (~300 tickers) ────────────────────────────────────────
 # Criteria: optionable US equity, ADV typically > 5M shares, beta > 0.7,
@@ -88,9 +92,8 @@ BEAR_CALL_UNIVERSE = [
     "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "ARKK", "ARKG",
     "SMH", "SOXX", "KWEB", "GDX", "GDXJ", "USO", "UNG",
     "TLT", "HYG", "EMB", "EEM", "EWZ", "FXI",
-    # ── Misc high-vol / meme-adjacent ────────────────────────────────────────
-    "GME", "AMC", "BBBY", "SPCE", "NKLA", "WKHS", "RIDE", "HYLN",
-    "PTRA", "REI", "BLNK", "CHPT", "EVGO", "FFIE",
+    # ── EV charging / cleantech (liquid, real option chains) ─────────────────
+    "BLNK", "CHPT", "EVGO",
 ]
 
 # De-duplicate while preserving order
@@ -216,7 +219,7 @@ def cheap_prescreen(tickers: list, max_keep: int = PRESCREEN_DEFAULT_KEEP) -> li
           f"({len(stage_a_rejects)} rejected)")
 
     # ── Stage B: per-ticker fast_info on top survivors ─────────────────────────
-    print(f"[PRESCREEN] stage B: checking earnings + beta on {len(stage_a_survivors)} tickers ...")
+    print(f"[PRESCREEN] stage B: checking earnings + beta + mktcap + SI on {len(stage_a_survivors)} tickers ...")
     today = datetime.now(timezone.utc).date()
     earnings_cutoff = today + timedelta(days=EARNINGS_DAYS)
     stage_b_rejects = {}
@@ -236,6 +239,30 @@ def cheap_prescreen(tickers: list, max_keep: int = PRESCREEN_DEFAULT_KEEP) -> li
                     beta = None
             if beta is not None and float(beta) > BETA_MAX:
                 stage_b_rejects[t] = f"beta {beta:.2f} > {BETA_MAX}"
+                continue
+
+            # Market cap check — reject distressed micro-caps with thin chains
+            mktcap = getattr(info, "market_cap", None)
+            if mktcap is None:
+                try:
+                    mktcap = yf.Ticker(t).info.get("marketCap", None)
+                except Exception:
+                    mktcap = None
+            if mktcap is not None and float(mktcap) < MKTCAP_MIN:
+                stage_b_rejects[t] = (f"mktcap ${float(mktcap)/1e9:.2f}B "
+                                      f"< ${MKTCAP_MIN/1e9:.1f}B floor")
+                continue
+
+            # Short interest check — high SI = squeeze risk for a credit seller
+            si_pct = None
+            try:
+                si_raw = yf.Ticker(t).info.get("shortPercentOfFloat")
+                if si_raw is not None:
+                    si_pct = float(si_raw) * 100.0
+            except Exception:
+                si_pct = None
+            if si_pct is not None and si_pct >= SI_PCT_MAX:
+                stage_b_rejects[t] = f"SI% {si_pct:.1f}% ≥ {SI_PCT_MAX:.0f}% (squeeze risk)"
                 continue
 
             # Earnings proximity check
