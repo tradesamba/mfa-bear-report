@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MFA Bear — Bear Call Spread Report</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --fg:#e6e8eb; --mut:#9aa0aa; --acc:#4f8cff;
+          --ok:#2ecc71; --bad:#ff5c5c; --warn:#ffb84d; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; padding:14px; }
+  h1 { font-size:18px; margin:0 0 2px; }
+  h2 { font-size:15px; margin:18px 0 8px; color:var(--acc); }
+  .mut { color:var(--mut); font-size:12px; }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin:12px 0; }
+  .banner { padding:12px 14px; border-radius:12px; font-weight:600; margin:12px 0; }
+  .standdown { background:#3a1414; color:var(--bad); border:1px solid var(--bad); }
+  .go { background:#10331f; color:var(--ok); border:1px solid var(--ok); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { text-align:left; padding:5px 6px; border-bottom:1px solid #262a33; white-space:nowrap; }
+  th { color:var(--mut); font-weight:600; }
+  .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .pill { display:inline-block; padding:1px 6px; border-radius:6px; font-size:11px; }
+  .p-ok{background:#10331f;color:var(--ok);} .p-bad{background:#3a1414;color:var(--bad);}
+  .p-warn{background:#33270f;color:var(--warn);}
+  textarea { width:100%; min-height:120px; background:#0c0e12; color:var(--fg);
+             border:1px solid #2a2f3a; border-radius:10px; padding:10px; font:12px/1.4 ui-monospace,Menlo,monospace; resize:vertical; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:10px; padding:11px 14px;
+           font-size:15px; font-weight:600; width:100%; margin-top:8px; cursor:pointer; }
+  button.sec { background:#2a2f3a; }
+  .step { font-size:12px; color:var(--mut); margin-bottom:6px; }
+  .hidden { display:none; }
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+</style>
+</head>
+<body>
+<h1>🐻 MFA Bear — Bear Call Spreads</h1>
+<div class="mut" id="runts"></div>
+
+<div id="banner"></div>
+
+<div class="card" id="bcsCard">
+  <h2>Top Bear Call Spreads</h2>
+  <div class="scroll"><table id="bcsTbl"></table></div>
+</div>
+
+<div class="card">
+  <h2>Phase 0 — Regime</h2>
+  <div id="regime" class="mut"></div>
+  <div class="scroll"><table id="regimeTbl"></table></div>
+</div>
+
+<div class="card">
+  <h2>Integrity Gate</h2>
+  <div class="scroll"><table id="gateTbl"></table></div>
+</div>
+
+<div class="card">
+  <h2>Technicals (cleared)</h2>
+  <div class="scroll"><table id="techTbl"></table></div>
+</div>
+
+<div class="card" id="altCard">
+  <h2>Alt Data — Section B</h2>
+  <div class="scroll"><table id="altTbl"></table></div>
+</div>
+
+<div class="card" id="step1">
+  <div class="step">STEP 1 · Copy this into the Grok app (attach the MFABear V1 guide first)</div>
+  <textarea id="grokBox" readonly></textarea>
+  <button onclick="copyEl('grokBox', this)">📋 Copy Grok prompt</button>
+</div>
+
+<div class="card" id="step2">
+  <div class="step">STEP 2 · Paste Grok's full sentiment reply here</div>
+  <textarea id="grokReply" placeholder="Paste Grok's response..."></textarea>
+  <button onclick="genClaude()">⚙️ Generate Claude prompt</button>
+</div>
+
+<div class="card hidden" id="step3">
+  <div class="step">STEP 3 · Copy this into the Claude app (attach the MFABear V1 guide first)</div>
+  <textarea id="claudeBox" readonly></textarea>
+  <button onclick="copyEl('claudeBox', this)">📋 Copy Claude prompt</button>
+</div>
+
+<div class="mut" style="margin-top:18px">Numbers are code-sourced (yfinance/FRED). LLMs consume — never originate — them.
+Prices are ~15 min delayed; confirm live at your broker before entry.
+<br>*POP = delta-implied probability OTM (theoretical, capped 85%) — NOT a measured win rate.
+Bear call spreads have asymmetric payoff (max loss &gt; max gain). Close before earnings.</div>
+
+<script>
+const D = {"run_ts": "2026-06-27 00:59 UTC", "profile": "winrate", "survivors": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "PLTR", "CRWD", "HOOD"], "top4": [], "bcs": [{"t": "AAPL", "score": 36.5, "kind": "", "dte": 0, "expiry": "", "short": NaN, "long": NaN, "credit": NaN, "width": NaN, "cwr": NaN, "pop": NaN, "delta": NaN, "be": NaN, "suitable": false, "tradeable": false, "vetoes": ["V5 no chain-verified structure \u2192 STAND DOWN", "V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": ""}, {"t": "MSFT", "score": 67.0, "kind": "swing", "dte": 34, "expiry": "2026-07-31", "short": 435.0, "long": 455.0, "credit": 0.98, "width": 20.0, "cwr": 0.049, "pop": 84.3, "delta": 0.1566, "be": 435.98, "suitable": true, "tradeable": false, "vetoes": ["V5 credit/width 0.049 < 0.09", "V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": "chain"}, {"t": "NVDA", "score": 74.6, "kind": "swing", "dte": 34, "expiry": "2026-07-31", "short": 220.0, "long": 225.0, "credit": 0.41, "width": 5.0, "cwr": 0.082, "pop": 85.3, "delta": 0.1474, "be": 220.41, "suitable": true, "tradeable": false, "vetoes": ["V5 credit/width 0.082 < 0.09", "V5 iv/rv 0.814 < 1.0 (not selling rich vol)", "V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": "chain"}, {"t": "AMZN", "score": 56.3, "kind": "", "dte": 0, "expiry": "", "short": NaN, "long": NaN, "credit": NaN, "width": NaN, "cwr": NaN, "pop": NaN, "delta": NaN, "be": NaN, "suitable": false, "tradeable": false, "vetoes": ["V5 no chain-verified structure \u2192 STAND DOWN", "V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": ""}, {"t": "META", "score": 86.0, "kind": "swing", "dte": 34, "expiry": "2026-07-31", "short": 645.0, "long": 650.0, "credit": 0.53, "width": 5.0, "cwr": 0.106, "pop": 83.4, "delta": 0.1657, "be": 645.53, "suitable": true, "tradeable": false, "vetoes": ["V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": "chain"}, {"t": "GOOGL", "score": 60.4, "kind": "swing", "dte": 34, "expiry": "2026-07-31", "short": 390.0, "long": 400.0, "credit": 0.81, "width": 10.0, "cwr": 0.081, "pop": 84.0, "delta": 0.1599, "be": 390.81, "suitable": true, "tradeable": false, "vetoes": ["V5 credit/width 0.081 < 0.09", "V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": "chain"}, {"t": "TSLA", "score": 85.4, "kind": "swing", "dte": 34, "expiry": "2026-07-31", "short": 445.0, "long": 450.0, "credit": 0.6, "width": 5.0, "cwr": 0.12, "pop": 82.4, "delta": 0.1756, "be": 445.6, "suitable": true, "tradeable": false, "vetoes": ["V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": "chain"}, {"t": "PLTR", "score": 54.9, "kind": "", "dte": 0, "expiry": "", "short": NaN, "long": NaN, "credit": NaN, "width": NaN, "cwr": NaN, "pop": NaN, "delta": NaN, "be": NaN, "suitable": false, "tradeable": false, "vetoes": ["V5 no chain-verified structure \u2192 STAND DOWN", "V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": ""}, {"t": "CRWD", "score": 41.7, "kind": "", "dte": 0, "expiry": "", "short": NaN, "long": NaN, "credit": NaN, "width": NaN, "cwr": NaN, "pop": NaN, "delta": NaN, "be": NaN, "suitable": false, "tradeable": false, "vetoes": ["V2 RSI > 60", "V4 bullish ribbon (strong uptrend)", "V4 ema_spread > 4%", "V5 no chain-verified structure \u2192 STAND DOWN", "V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": ""}, {"t": "HOOD", "score": 61.3, "kind": "", "dte": 0, "expiry": "", "short": NaN, "long": NaN, "credit": NaN, "width": NaN, "cwr": NaN, "pop": NaN, "delta": NaN, "be": NaN, "suitable": false, "tradeable": false, "vetoes": ["V4 ema_spread > 4%", "V5 no chain-verified structure \u2192 STAND DOWN", "V6 option liquidity unknown/poor \u2192 STAND DOWN"], "basis": ""}], "dropped": [], "regime": "Only N=5 of 12 metrics sourced (need \u22659). Partial avg 2 \u2192 FORCED NEUTRAL (\u00b115) per V6 \u00a70A until the remaining 4+ metrics are supplied (breadth / A-D / sector / Fed / econ-surprise / credit / put-call).", "grok_prompt": "I have attached the MFABear V1 Comprehensive Guide. Run BEAR-CALL sentiment analysis.\nThese are bear call spread candidates \u2014 they WIN if the stock stays BELOW the short strike (flat/down/mildly-up). You are given verified numbers from a deterministic feed; do NOT re-quote, update, or correct any number. Your job is sentiment + bullish-CATALYST RISK only.\n\nTICKERS (bear-call candidates): AAPL, MSFT, NVDA, AMZN, META, GOOGL, TSLA, PLTR, CRWD, HOOD\n\nFor each ticker assess what could make it RALLY through the short strike (the risk to us):\n(1) bullish social momentum / unusual hype last 48h; (2) imminent bullish catalysts (product launch, conference, analyst day, buyback, activist); (3) short-squeeze chatter; (4) upgrade cycle / call-buying narrative; (5) is bearish thesis crowded (contrarian risk)?\nApply FRESHNESS (discard >72h) and PUMP/ squeeze circuit-breakers.\n\nOUTPUT one row per ticker:\nTICKER | Bull-Momentum% | Squeeze risk (L/M/H) | Imminent bull catalyst? | Bear-thesis crowded? | UpsideRisk score(/5, 5=dangerous) | Narrative", "claude_prefix": "I have attached the MFABear V1 Comprehensive Guide. It is your operating manual.\nGOAL: confirm the TOP 4 BEAR CALL SPREADS. A bear call spread sells an OTM call and buys a higher call; it keeps the credit if price stays BELOW the short strike at expiry. Win RATE is high but payoff is asymmetric (max loss > max gain), so be conservative.\n\n\u2550\u2550\u2550\u2550 REGIME \u2550\u2550\u2550\u2550\nOnly N=5 of 12 metrics sourced (need \u22659). Partial avg 2 \u2192 FORCED NEUTRAL (\u00b115) per V6 \u00a70A until the remaining 4+ metrics are supplied (breadth / A-D / sector / Fed / econ-surprise / credit / put-call).\n(Bear calls want flat/down/mildly-up tape. A broad bull thrust BLOCKS new entries.)\n\n\u2550\u2550\u2550\u2550 LAYER 0 DATA (deterministic \u2014 DO NOT re-quote or alter) \u2550\u2550\u2550\u2550\nSECTION M \u2014 PRE-HOOK MANIFEST\nAAPL  | last split: 4:1 (2020-08-31) | ATH \u2248 $317.40 | 52w range: $201.08\u2013$315.20 | next earnings: 2026-07-30 | ADV \u2248 67.0M\nMSFT  | last split: 2:1 (2003-02-18) | ATH \u2248 $555.45 | 52w range: $352.83\u2013$542.07 | next earnings: 2026-07-29 | ADV \u2248 49.8M\nNVDA  | last split: 10:1 (2024-06-10) | ATH \u2248 $236.54 | 52w range: $153.30\u2013$235.74 | next earnings: 2026-08-26 | ADV \u2248 169.9M\nAMZN  | last split: 20:1 (2022-06-06) | ATH \u2248 $278.56 | 52w range: $198.79\u2013$274.99 | next earnings: 2026-07-30 | ADV \u2248 60.9M\nMETA  | last split: none | ATH \u2248 $796.25 | 52w range: $525.72\u2013$790.00 | next earnings: 2026-07-29 | ADV \u2248 19.2M\nGOOGL | last split: 20:1 (2022-07-18) | ATH \u2248 $408.61 | 52w range: $174.36\u2013$402.62 | next earnings: 2026-07-23 | ADV \u2248 41.0M\nTSLA  | last split: 3:1 (2022-08-25) | ATH \u2248 $498.83 | 52w range: $293.94\u2013$489.88 | next earnings: 2026-07-22 | ADV \u2248 47.1M\nPLTR  | last split: none | ATH \u2248 $207.52 | 52w range: $107.27\u2013$207.18 | next earnings: 2026-08-03 | ADV \u2248 45.1M\nCRWD  | last split: none | ATH \u2248 $785.66 | 52w range: $350.25\u2013$782.17 | next earnings: 2026-09-01 | ADV \u2248 3.6M\nHOOD  | last split: none | ATH \u2248 $153.86 | 52w range: $65.16\u2013$152.46 | next earnings: 2026-07-29 | ADV \u2248 36.8M\n\nSECTION B \u2014 ALT DATA\nTICKER | Dark Pool | Options Flow (P/C OI) | GEX | SI% float + DTC | Insider (6mo)\nAAPL | N/A (no free feed) | P/C OI 0.48 | N/A (no free feed) | 0.98% / 2.9d (rising) | -750,748 sh (net selling)\nMSFT | N/A (no free feed) | P/C OI 0.86 | N/A (no free feed) | 1.28% / 2.5d (rising) | -234,387 sh (net selling)\nNVDA | N/A (no free feed) | P/C OI 1.21 | N/A (no free feed) | 1.29% / 1.7d (flat) | -4,595,567 sh (net selling)\nAMZN | N/A (no free feed) | P/C OI 0.66 | N/A (no free feed) | 1.01% / 2.4d (falling) | -266,460 sh (net selling)\nMETA | N/A (no free feed) | P/C OI 0.67 | N/A (no free feed) | 1.37% / 1.7d (falling) | -46,222 sh (net selling)\nGOOGL | N/A (no free feed) | P/C OI 0.67 | N/A (no free feed) | 1.53% / 2.8d (rising) | -281,332 sh (net selling)\nTSLA | N/A (no free feed) | P/C OI 0.81 | N/A (no free feed) | 2.34% / 1.6d (rising) | +1,561,128 sh (net buying)\nPLTR | N/A (no free feed) | P/C OI 0.34 | N/A (no free feed) | 3.57% / 2.0d (rising) | -4,092,338 sh (net selling)\nCRWD | N/A (no free feed) | P/C OI 1.03 | N/A (no free feed) | 3.08% / 2.0d (rising) | -116,978 sh (net selling)\nHOOD | N/A (no free feed) | P/C OI 0.46 | N/A (no free feed) | 4.77% / 1.2d (flat) | +46,516 sh (net buying)\nNOTE: Dark Pool + GEX = N/A (no free feed) \u2014 NOT estimated.\n\nSECTION C \u2014 TECHNICALS\nTICKER | Price + Timestamp | split/ATH/52w reconciliation | EMA Ribbon | MACD | RSI | ATR% | RVOL% (basis) | ADX | Earnings | Beta\nAAPL | $283.78 (2026-06-26) | price $283.78 (as of 2026-06-26); split 4:1 (2020-08-31); ATH $317.40; within 52w \u2714 | mixed (+2.5%) | bear (hist\u2212) | 41 | 2.9% | 390% [daily] | 25 | 2026-07-30 | 0.88\nMSFT | $372.97 (2026-06-26) | price $372.97 (as of 2026-06-26); split 2:1 (2003-02-18); ATH $555.45; within 52w \u2714 | \u2212ribbon down (-9.0%) | bear (hist\u2212) | 40 | 3.5% | 363% [daily] | 24 | 2026-07-29 | 0.82\nNVDA | $192.53 (2026-06-26) | price $192.53 (as of 2026-06-26); split 10:1 (2024-06-10); ATH $236.54; within 52w \u2714 | mixed (-0.2%) | bear (hist\u2212) | 38 | 3.8% | 105% [daily] | 16 | 2026-08-26 | 1.86 \u26a0V7\nAMZN | $232.69 (2026-06-26) | price $232.69 (as of 2026-06-26); split 20:1 (2022-06-06); ATH $278.56; within 52w \u2714 | mixed (-3.1%) | bear (hist\u2212) | 40 | 3.4% | 396% [daily] | 35 | 2026-07-30 | 1.42\nMETA | $550.25 (2026-06-26) | price $550.25 (as of 2026-06-26); split none; ATH $796.25; within 52w \u2714 | \u2212ribbon down (-8.6%) | bear (hist\u2212) | 37 | 3.4% | 96% [daily] | 19 | 2026-07-29 | 1.44\nGOOGL | $337.39 (2026-06-26) | price $337.39 (as of 2026-06-26); split 20:1 (2022-07-18); ATH $408.61; within 52w \u2714 | mixed (+0.7%) | bear (hist\u2212) | 33 | 3.4% | 271% [daily] | 20 | 2026-07-23 | 1.31\nTSLA | $379.71 (2026-06-26) | price $379.71 (as of 2026-06-26); split 3:1 (2022-08-25); ATH $498.83; within 52w \u2714 | \u2212ribbon down (-3.9%) | bear (hist\u2212) | 41 | 4.4% | 103% [daily] | 18 | 2026-07-22 | 2.04 \u26a0V7\nPLTR | $112.93 (2026-06-26) | price $112.93 (as of 2026-06-26); split none; ATH $207.52; within 52w \u2714 | \u2212ribbon down (-15.7%) | bear (hist\u2212) | 34 | 5.8% | 133% [daily] | 22 | 2026-08-03 | 1.78 \u26a0V7\nCRWD | $701.09 (2026-06-26) | price $701.09 (as of 2026-06-26); split none; ATH $785.66; within 52w \u2714 | +ribbon up (+22.1%) | bear (hist\u2212) | 61 | 4.6% | 79% [daily] | 28 | 2026-09-01 | 1.42\nHOOD | $98.69 (2026-06-26) | price $98.69 (as of 2026-06-26); split none; ATH $153.86; within 52w \u2714 | mixed (+12.3%) | bear (hist\u2212) | 57 | 6.7% | 119% [daily] | 24 | 2026-07-29 | 3.07 \u26a0V7\n\nSECTION BCS \u2014 TOP 0 BEAR CALL SPREADS (profile=winrate, chain-verified)\nSTAND DOWN \u2014 0 tradeable bear-call candidates today.\n\n\u2550\u2550\u2550\u2550 UPSIDE-RISK SENTIMENT (from Grok Step 1) \u2550\u2550\u2550\u2550\n", "claude_suffix": "\n\n\u2550\u2550\u2550\u2550 DECISION INSTRUCTIONS \u2550\u2550\u2550\u2550\n0. Veto #8 (data-integrity) ALREADY PASSED in Layer 0. The bear-call structures in SECTION BCS are chain-verified (real strikes/credit/delta). Do NOT invent strikes or re-price.\n1. For each SECTION BCS candidate, confirm: bearish/neutral trend, short strike above resistance, NO earnings before expiry, NO squeeze risk, credit/width meets the profile floor.\n2. Use the Grok UpsideRisk sentiment to DOWNGRADE or REJECT any name with a live bullish catalyst or high squeeze risk \u2014 that is the asymmetric danger for a short call.\n3. Confirm the TOP 4 (or fewer). If a candidate has any unresolved upside risk, drop it.\n4. ZERO safe candidates \u2192 say STAND DOWN. Do NOT manufacture a Top 4 on bullish tape.\n5. HONESTY: POP is delta-implied (theoretical), capped at 85%, NOT a measured win rate; real win rate is reduced by drift, gaps, slippage. Always pair POP with the R:R (max loss > max gain). Management: take profit ~50% credit, stop ~2\u00d7 credit, close before any earnings.\n\nOUTPUT: confirmed Top 4 bear call spreads (ticker, short\u2192long strikes, credit/width, POP, breakeven, DTE, why-safe + upside-risk note, management plan). Or STAND DOWN.", "rows": [{"ticker": "AAPL", "ok": true, "conflicts": [], "flags": [], "last_split": "4:1 (2020-08-31)", "ath": 317.4, "low_52w": 201.08, "high_52w": 315.2, "next_earnings": "2026-07-30", "earnings_in_window": false, "adv": 66968926.0, "price": 283.78, "as_of": "2026-06-26", "ema_ribbon": "mixed", "ema_spread_pct": 2.5, "macd_hist": -2.764, "rsi14": 41.3, "atr_pct": 2.87, "adx14": 25.0, "rvol": 3.9, "rvol_basis": "daily", "beta": 0.88, "passes_rvol_gate": true, "passes_adv_floor": true, "short_pct_float": 0.98, "short_days_to_cover": 2.88, "short_trend": "rising", "insider_net_shares": -750748.0, "insider_note": "net selling", "putcall_oi": 0.48, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "MSFT", "ok": true, "conflicts": [], "flags": [], "last_split": "2:1 (2003-02-18)", "ath": 555.45, "low_52w": 352.83, "high_52w": 542.07, "next_earnings": "2026-07-29", "earnings_in_window": false, "adv": 49815733.0, "price": 372.97, "as_of": "2026-06-26", "ema_ribbon": "bearish", "ema_spread_pct": -9.0, "macd_hist": -4.06, "rsi14": 40.4, "atr_pct": 3.54, "adx14": 24.4, "rvol": 3.63, "rvol_basis": "daily", "beta": 0.82, "passes_rvol_gate": true, "passes_adv_floor": true, "short_pct_float": 1.28, "short_days_to_cover": 2.54, "short_trend": "rising", "insider_net_shares": -234387.0, "insider_note": "net selling", "putcall_oi": 0.86, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "NVDA", "ok": true, "conflicts": [], "flags": ["beta 1.86 > 1.5 (Veto #7 flag)"], "last_split": "10:1 (2024-06-10)", "ath": 236.54, "low_52w": 153.3, "high_52w": 235.74, "next_earnings": "2026-08-26", "earnings_in_window": false, "adv": 169875692.0, "price": 192.53, "as_of": "2026-06-26", "ema_ribbon": "mixed", "ema_spread_pct": -0.17, "macd_hist": -1.904, "rsi14": 37.5, "atr_pct": 3.79, "adx14": 16.1, "rvol": 1.05, "rvol_basis": "daily", "beta": 1.86, "passes_rvol_gate": false, "passes_adv_floor": true, "short_pct_float": 1.29, "short_days_to_cover": 1.72, "short_trend": "flat", "insider_net_shares": -4595567.0, "insider_note": "net selling", "putcall_oi": 1.21, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "AMZN", "ok": true, "conflicts": [], "flags": [], "last_split": "20:1 (2022-06-06)", "ath": 278.56, "low_52w": 198.79, "high_52w": 274.99, "next_earnings": "2026-07-30", "earnings_in_window": false, "adv": 60884799.0, "price": 232.69, "as_of": "2026-06-26", "ema_ribbon": "mixed", "ema_spread_pct": -3.06, "macd_hist": -1.397, "rsi14": 39.5, "atr_pct": 3.38, "adx14": 35.1, "rvol": 3.96, "rvol_basis": "daily", "beta": 1.42, "passes_rvol_gate": true, "passes_adv_floor": true, "short_pct_float": 1.01, "short_days_to_cover": 2.38, "short_trend": "falling", "insider_net_shares": -266460.0, "insider_note": "net selling", "putcall_oi": 0.66, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "META", "ok": true, "conflicts": [], "flags": [], "last_split": "none", "ath": 796.25, "low_52w": 525.72, "high_52w": 790.0, "next_earnings": "2026-07-29", "earnings_in_window": false, "adv": 19172622.0, "price": 550.25, "as_of": "2026-06-26", "ema_ribbon": "bearish", "ema_spread_pct": -8.6, "macd_hist": -3.084, "rsi14": 37.4, "atr_pct": 3.38, "adx14": 18.6, "rvol": 0.96, "rvol_basis": "daily", "beta": 1.44, "passes_rvol_gate": false, "passes_adv_floor": true, "short_pct_float": 1.37, "short_days_to_cover": 1.69, "short_trend": "falling", "insider_net_shares": -46222.0, "insider_note": "net selling", "putcall_oi": 0.67, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "GOOGL", "ok": true, "conflicts": [], "flags": [], "last_split": "20:1 (2022-07-18)", "ath": 408.61, "low_52w": 174.36, "high_52w": 402.62, "next_earnings": "2026-07-23", "earnings_in_window": false, "adv": 40973604.0, "price": 337.39, "as_of": "2026-06-26", "ema_ribbon": "mixed", "ema_spread_pct": 0.72, "macd_hist": -3.242, "rsi14": 33.3, "atr_pct": 3.43, "adx14": 19.8, "rvol": 2.71, "rvol_basis": "daily", "beta": 1.31, "passes_rvol_gate": true, "passes_adv_floor": true, "short_pct_float": 1.53, "short_days_to_cover": 2.79, "short_trend": "rising", "insider_net_shares": -281332.0, "insider_note": "net selling", "putcall_oi": 0.67, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "TSLA", "ok": true, "conflicts": [], "flags": ["beta 2.04 > 1.5 (Veto #7 flag)"], "last_split": "3:1 (2022-08-25)", "ath": 498.83, "low_52w": 293.94, "high_52w": 489.88, "next_earnings": "2026-07-22", "earnings_in_window": false, "adv": 47079929.0, "price": 379.71, "as_of": "2026-06-26", "ema_ribbon": "bearish", "ema_spread_pct": -3.9, "macd_hist": -3.603, "rsi14": 41.2, "atr_pct": 4.42, "adx14": 17.9, "rvol": 1.03, "rvol_basis": "daily", "beta": 2.04, "passes_rvol_gate": false, "passes_adv_floor": true, "short_pct_float": 2.34, "short_days_to_cover": 1.65, "short_trend": "rising", "insider_net_shares": 1561128.0, "insider_note": "net buying", "putcall_oi": 0.81, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "PLTR", "ok": true, "conflicts": [], "flags": ["beta 1.78 > 1.5 (Veto #7 flag)"], "last_split": "none", "ath": 207.52, "low_52w": 107.27, "high_52w": 207.18, "next_earnings": "2026-08-03", "earnings_in_window": false, "adv": 45106353.0, "price": 112.93, "as_of": "2026-06-26", "ema_ribbon": "bearish", "ema_spread_pct": -15.7, "macd_hist": -2.539, "rsi14": 34.5, "atr_pct": 5.8, "adx14": 22.5, "rvol": 1.33, "rvol_basis": "daily", "beta": 1.78, "passes_rvol_gate": false, "passes_adv_floor": true, "short_pct_float": 3.57, "short_days_to_cover": 1.98, "short_trend": "rising", "insider_net_shares": -4092338.0, "insider_note": "net selling", "putcall_oi": 0.34, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "CRWD", "ok": true, "conflicts": [], "flags": [], "last_split": "none", "ath": 785.66, "low_52w": 350.25, "high_52w": 782.17, "next_earnings": "2026-09-01", "earnings_in_window": false, "adv": 3629020.0, "price": 701.09, "as_of": "2026-06-26", "ema_ribbon": "bullish", "ema_spread_pct": 22.1, "macd_hist": -7.133, "rsi14": 60.7, "atr_pct": 4.58, "adx14": 28.4, "rvol": 0.79, "rvol_basis": "daily", "beta": 1.42, "passes_rvol_gate": false, "passes_adv_floor": true, "short_pct_float": 3.08, "short_days_to_cover": 2.03, "short_trend": "rising", "insider_net_shares": -116978.0, "insider_note": "net selling", "putcall_oi": 1.03, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}, {"ticker": "HOOD", "ok": true, "conflicts": [], "flags": ["beta 3.07 > 1.5 (Veto #7 flag)"], "last_split": "none", "ath": 153.86, "low_52w": 65.16, "high_52w": 152.46, "next_earnings": "2026-07-29", "earnings_in_window": false, "adv": 36817345.0, "price": 98.69, "as_of": "2026-06-26", "ema_ribbon": "mixed", "ema_spread_pct": 12.27, "macd_hist": -0.021, "rsi14": 57.2, "atr_pct": 6.72, "adx14": 24.4, "rvol": 1.19, "rvol_basis": "daily", "beta": 3.07, "passes_rvol_gate": false, "passes_adv_floor": true, "short_pct_float": 4.77, "short_days_to_cover": 1.25, "short_trend": "flat", "insider_net_shares": 46516.0, "insider_note": "net buying", "putcall_oi": 0.46, "dark_pool": "N/A (no free feed)", "gex": "N/A (no free feed)"}], "regime_metrics": [{"n": "SPY vs 50DMA", "v": "-0.1%", "s": 1.1}, {"n": "VIX level", "v": "18.4 rising", "s": 3.3}, {"n": "Credit spreads (HY OAS)", "v": "NEEDS FEED/ESTIMATE", "s": null}, {"n": "Yield curve (10Y-13wk proxy)", "v": "+0.07pp", "s": -0.4}, {"n": "DXY 20d momentum", "v": "+2.5%", "s": -3.1}, {"n": "VIX term (VIX/VIX3M)", "v": "0.915", "s": 4.0}, {"n": "Market breadth (%>200DMA)", "v": "NEEDS FEED/ESTIMATE", "s": null}, {"n": "NYSE advance/decline", "v": "NEEDS FEED/ESTIMATE", "s": null}, {"n": "Sector rotation", "v": "NEEDS FEED/ESTIMATE", "s": null}, {"n": "Fed / macro backdrop", "v": "NEEDS FEED/ESTIMATE", "s": null}, {"n": "Economic Surprise Index", "v": "NEEDS FEED/ESTIMATE", "s": null}, {"n": "Equity put/call (contrarian)", "v": "NEEDS FEED/ESTIMATE", "s": null}]};
+const STAND_DOWN = true;
+
+function copyEl(id, btn){
+  const t = document.getElementById(id);
+  t.select(); t.setSelectionRange(0, 999999);
+  navigator.clipboard.writeText(t.value).then(()=>{
+    const o = btn.textContent; btn.textContent='✅ Copied'; setTimeout(()=>btn.textContent=o,1200);
+  }).catch(()=>{ document.execCommand('copy'); });
+}
+
+function genClaude(){
+  const reply = document.getElementById('grokReply').value.trim();
+  const body = D.claude_prefix + (reply || '[PASTE GROK SENTIMENT TABLE HERE]') + D.claude_suffix;
+  document.getElementById('claudeBox').value = body;
+  document.getElementById('step3').classList.remove('hidden');
+  document.getElementById('step3').scrollIntoView({behavior:'smooth'});
+}
+
+function el(tag, txt, cls){ const e=document.createElement(tag); if(txt!=null)e.textContent=txt; if(cls)e.className=cls; return e; }
+function row(cells){ const tr=document.createElement('tr'); cells.forEach(c=>{ const td=document.createElement(typeof c==='object'&&c.th?'th':'td'); if(typeof c==='object'){td.innerHTML=c.html||'';}else{td.textContent=c;} tr.appendChild(td);}); return tr; }
+
+// run timestamp + banner
+document.getElementById('runts').textContent = 'Generated ' + D.run_ts + ' · profile: ' + (D.profile||'winrate');
+const b = document.getElementById('banner');
+if(STAND_DOWN){ b.className='banner standdown'; b.textContent='⛔ STAND DOWN — 0 tradeable bear call spreads today. (Expected on bullish/quiet tape.)'; }
+else { b.className='banner go'; b.textContent='🐻 '+D.top4.length+' bear call spread(s): '+D.top4.join(', '); }
+
+// Top bear call spreads table
+const bt = document.getElementById('bcsTbl');
+bt.appendChild(row([{th:1,html:'Tk'},{th:1,html:'Score'},{th:1,html:'Trade'},{th:1,html:'Short→Long'},{th:1,html:'Cr/Wd (CWR)'},{th:1,html:'POP*'},{th:1,html:'BE'},{th:1,html:'Status'}]));
+(D.bcs||[]).sort((x,y)=>y.score-x.score).forEach(r=>{
+  const trade = r.basis==='chain' ? (r.kind+' '+r.dte+'DTE') : '—';
+  const sl = r.basis==='chain' ? ('$'+r.short+'→$'+r.long) : '—';
+  const cw = r.basis==='chain' ? ('$'+r.credit+'/$'+r.width+' ('+r.cwr.toFixed(2)+')') : '—';
+  const pop = (r.pop===r.pop) ? ('~'+r.pop.toFixed(0)+'%') : '—';
+  const be = (r.be===r.be) ? ('$'+r.be) : '—';
+  let status;
+  if(r.tradeable) status={html:'<span class="pill p-ok">TRADEABLE</span>'};
+  else status={html:'<span class="pill p-bad">no</span> '+(r.vetoes&&r.vetoes.length?r.vetoes[0]:'')};
+  bt.appendChild(row([r.ticker, r.score!=null?r.score.toFixed(0):'—', trade, sl, cw, pop, be, status]));
+});
+if(!(D.bcs||[]).length){ document.getElementById('bcsCard').querySelector('.scroll').innerHTML='<div class="mut">No scored candidates (all dropped at integrity gate or unsuitable).</div>'; }
+
+// regime
+document.getElementById('regime').textContent = D.regime;
+const rt = document.getElementById('regimeTbl');
+rt.appendChild(row([{th:1,html:'Metric'},{th:1,html:'Value'},{th:1,html:'Score'}]));
+(D.regime_metrics||[]).forEach(m=>{
+  const s = (m.s===null||m.s===undefined)?'—':(m.s>0?'+':'')+m.s;
+  rt.appendChild(row([m.n, m.v, s]));
+});
+
+// integrity gate
+const gt = document.getElementById('gateTbl');
+gt.appendChild(row([{th:1,html:'Ticker'},{th:1,html:'Price'},{th:1,html:'ATH'},{th:1,html:'As-of'},{th:1,html:'Verdict'}]));
+D.rows.forEach(r=>{
+  const v = r.ok ? {html:'<span class="pill p-ok">CLEARED</span>'} : {html:'<span class="pill p-bad">CONFLICT</span> '+(r.conflicts.join('; '))};
+  gt.appendChild(row([r.ticker, r.price==null?'—':('$'+r.price.toFixed(2)), r.ath==null?'—':('$'+r.ath.toFixed(2)), r.as_of, v]));
+});
+
+// technicals (cleared only)
+const tt = document.getElementById('techTbl');
+tt.appendChild(row([{th:1,html:'Tk'},{th:1,html:'Price'},{th:1,html:'RSI'},{th:1,html:'MACDh'},{th:1,html:'EMA'},{th:1,html:'ATR%'},{th:1,html:'ADX'},{th:1,html:'RVOL'},{th:1,html:'Beta'},{th:1,html:'Gates'}]));
+D.rows.filter(r=>r.ok).forEach(r=>{
+  const rv = (r.rvol*100).toFixed(0)+'% '+(r.passes_rvol_gate?'<span class="ok">✔</span>':'<span class="bad">✘</span>')+' <span class="mut">['+r.rvol_basis+']</span>';
+  const gates = (r.passes_adv_floor?'ADV✔':'<span class="bad">ADV✘</span>')+(r.beta>1.5?' <span class="warn">β'+r.beta+'</span>':'');
+  tt.appendChild(row([r.ticker, '$'+r.price.toFixed(2), r.rsi14.toFixed(0), r.macd_hist.toFixed(2), r.ema_ribbon, r.atr_pct.toFixed(1), r.adx14.toFixed(0), {html:rv}, r.beta.toFixed(2), {html:gates}]));
+});
+
+// alt data
+const at = document.getElementById('altTbl');
+const hasAlt = D.rows.some(r=>r.ok && (r.short_pct_float===r.short_pct_float || r.putcall_oi===r.putcall_oi));
+if(!hasAlt){ document.getElementById('altCard').querySelector('.scroll').innerHTML='<div class="mut">Not fetched (run with --alt). Score Alt as N/A per V6 §0B.</div>'; }
+else {
+  at.appendChild(row([{th:1,html:'Tk'},{th:1,html:'SI%float'},{th:1,html:'DTC'},{th:1,html:'Trend'},{th:1,html:'P/C OI'},{th:1,html:'Insider 6mo'},{th:1,html:'DarkPool'},{th:1,html:'GEX'}]));
+  D.rows.filter(r=>r.ok).forEach(r=>{
+    const f=v=>v===v?v:null; // NaN check
+    at.appendChild(row([r.ticker,
+      f(r.short_pct_float)==null?'N/A':r.short_pct_float.toFixed(2)+'%',
+      f(r.short_days_to_cover)==null?'N/A':r.short_days_to_cover.toFixed(1),
+      r.short_trend||'N/A',
+      f(r.putcall_oi)==null?'N/A':r.putcall_oi.toFixed(2),
+      f(r.insider_net_shares)==null?'N/A':(r.insider_net_shares>0?'+':'')+Math.round(r.insider_net_shares).toLocaleString()+' ('+r.insider_note+')',
+      r.dark_pool, r.gex]));
+  });
+}
+
+// fill prompts
+document.getElementById('grokBox').value = D.grok_prompt;
+if(STAND_DOWN){ ['step1','step2'].forEach(id=>document.getElementById(id).classList.add('hidden')); }
+</script>
+</body>
+</html>
