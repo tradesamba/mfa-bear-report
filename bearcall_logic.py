@@ -38,7 +38,7 @@ HV_RANK_FLOOR = 50           # don't sell vol below its own 1y median
 IV_RV_FLOOR = 1.0            # short_iv / realized vol — must be selling rich vol
 OPT_OI_MIN = 250             # per-leg open interest floor
 OPT_VOL_MIN = 10             # per-leg volume floor (relaxed from 50 — intraday vol is often 0 for valid strikes)
-OPT_SPREAD_MAX = 0.10         # leg bid/ask spread ≤ 10% of credit
+OPT_SPREAD_MAX = 0.20         # leg bid/ask spread ≤ 20% of mid (V3: relaxed from 10% — yfinance delayed quotes routinely show wider spreads than real market-maker fills; OI=250 is the primary liquidity gate)
 SQUEEZE_SI_PCT = 20.0         # short % float ≥ this = squeeze veto (global)
 SQUEEZE_DTC = 5.0            # days-to-cover ≥ this = squeeze veto
 EARNINGS_BUFFER_DAYS = 2      # veto if earnings within [today, expiry + buffer]
